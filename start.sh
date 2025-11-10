@@ -3,9 +3,6 @@ set -e
 
 echo "⏳ Waiting for external PostgreSQL to be ready..."
 # Adjust these values if necessary — they come from .env
-until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER"; do
-  sleep 2
-done
 
 echo "🚀 Running Alembic migrations..."
 alembic upgrade head
