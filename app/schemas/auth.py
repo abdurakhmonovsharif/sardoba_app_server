@@ -26,10 +26,17 @@ class ClientOTPVerify(BaseModel):
             return None
         if isinstance(value, date):
             return value
+        str_value = str(value).strip()
+        # Accept both dd.mm.yyyy and yyyy-mm-dd (ISO) formats
+        for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(str_value, fmt).date()
+            except ValueError:
+                continue
         try:
-            return datetime.strptime(value, "%d.%m.%Y").date()
+            return datetime.fromisoformat(str_value).date()
         except ValueError as exc:
-            raise ValueError("date_of_birth must be in format dd.mm.yyyy") from exc
+            raise ValueError("date_of_birth must be in format dd.mm.yyyy or yyyy-mm-dd") from exc
 
 
 class StaffLoginRequest(BaseModel):

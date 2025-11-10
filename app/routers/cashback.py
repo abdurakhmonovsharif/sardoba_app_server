@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_manager, get_db, get_token_payload
-from app.models import AuthActorType, Staff, User
-from app.schemas import CashbackCreate, CashbackHistoryResponse, CashbackRead
+from app.models import AuthActorType, Staff, User, CashbackTransaction, SardobaBranch
+from app.schemas import CashbackCreate, CashbackHistoryResponse, CashbackRead, LoyaltySummary
 from app.services import CashbackService
+from typing import Optional
 
 router = APIRouter(prefix="/cashback", tags=["cashback"])
 
@@ -59,4 +60,54 @@ def get_user_cashback(
     return {
         "loyalty": loyalty,
         "transactions": [CashbackRead.from_orm(entry) for entry in entries],
+    }
+
+
+
+@router.get("/loyalty-analytics", response_model=dict)
+def loyalty_analytics(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    manager: Staff = Depends(get_current_manager),
+    db: Session = Depends(get_db),
+):
+    """Return loyalty summary for users (paginated)."""
+    total = db.query(User).count()
+    users = db.query(User).order_by(User.id).offset((page - 1) * page_size).limit(page_size).all()
+    service = CashbackService(db)
+    items = [service.loyalty_summary(user=u) for u in users]
+    return {"pagination": {"page": page, "size": page_size, "total": total}, "items": items}
+
+
+
+@router.get("", response_model=dict)
+def list_cashbacks(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    search: str = Query(default=""),
+    branch: Optional[SardobaBranch] = Query(default=None),
+    manager: Staff = Depends(get_current_manager),
+    db: Session = Depends(get_db),
+):
+    """List cashback transactions (admin/manager only). Supports optional search by user name/phone and branch filter."""
+    query = db.query(CashbackTransaction).join(User).order_by(CashbackTransaction.created_at.desc())
+
+    if branch is not None:
+        # branch may be an Enum; compare to stored value
+        try:
+            branch_value = branch.value if hasattr(branch, "value") else int(branch)
+        except Exception:
+            branch_value = branch
+        query = query.filter(CashbackTransaction.branch_id == branch_value)
+
+    if search:
+        term = f"%{search}%"
+        query = query.filter((User.name.ilike(term)) | (User.phone.ilike(term)))
+
+    total = query.count()
+    items = query.offset((page - 1) * page_size).limit(page_size).all()
+
+    return {
+        "pagination": {"page": page, "size": page_size, "total": total},
+        "items": [CashbackRead.from_orm(i) for i in items],
     }
