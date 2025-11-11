@@ -9,6 +9,7 @@ from app.core.cache import cache_manager
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
+from app.core.database_init import init_database_schema
 from app.routers import get_api_router
 from app.services.bootstrap import ensure_default_admin
 
@@ -53,6 +54,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def startup_event():
+        init_database_schema(settings.DATABASE_URL)
         cache_manager.init_backend()
         ensure_default_admin()
 
