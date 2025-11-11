@@ -22,14 +22,14 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title=settings.PROJECT_NAME)
 
-    if settings.CORS_ORIGINS:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=settings.CORS_ORIGINS,
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+    # Add CORS middleware (always enabled)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ORIGINS if settings.CORS_ORIGINS else ["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.add_middleware(RequestContextMiddleware)
 

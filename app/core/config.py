@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     @validator("CORS_ORIGINS", pre=True)
     def assemble_cors_origins(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
+            # Handle wildcard (allow all origins)
+            v = v.strip().strip('"\'')  # Remove quotes if present
+            if v == "*":
+                return ["*"]
+            # Otherwise split by comma
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
 
