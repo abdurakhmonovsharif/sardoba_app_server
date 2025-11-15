@@ -6,11 +6,19 @@ class RateLimitExceeded(ServiceError):
     pass
 
 
+class SMSDeliveryError(ServiceError):
+    pass
+
+
 class OTPExpired(ServiceError):
     pass
 
 
 class OTPInvalid(ServiceError):
+    pass
+
+
+class OTPDeliveryFailed(ServiceError):
     pass
 
 

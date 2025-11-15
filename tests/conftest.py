@@ -18,6 +18,9 @@ os.environ.setdefault("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
 os.environ.setdefault("REFRESH_TOKEN_EXPIRE_DAYS", "7")
 os.environ.setdefault("OTP_EXPIRATION_MINUTES", "5")
 os.environ.setdefault("OTP_RATE_LIMIT_PER_HOUR", "10")
+os.environ.setdefault("ESKIZ_LOGIN", "test@example.com")
+os.environ.setdefault("ESKIZ_PASSWORD", "test-password")
+os.environ.setdefault("SMS_DRY_RUN", "true")
 
 from app.core.config import get_settings
 from app.core import db as db_module

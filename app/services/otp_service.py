@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models import OTPCode
+from app.services.sms_providers import EskizSMSProvider
 
 from . import exceptions
 
@@ -17,6 +18,17 @@ class OTPService:
     def __init__(self, db: Session):
         self.db = db
         self.settings = get_settings()
+        self.sms_logger = logging.getLogger("app.sms")
+        self._rate_limit_bypass = {
+            self._normalize_phone(phone) for phone in self.settings.OTP_RATE_LIMIT_BYPASS_PHONES
+        }
+        self._sms_provider: EskizSMSProvider | None = None
+        if not self.settings.SMS_DRY_RUN:
+            self._sms_provider = EskizSMSProvider(
+                email=self.settings.ESKIZ_LOGIN,
+                password=self.settings.ESKIZ_PASSWORD,
+                sender=self.settings.ESKIZ_FROM_WHOM,
+            )
 
     def _generate_code(self) -> str:
         if self.settings.OTP_STATIC_CODE:
@@ -25,24 +37,30 @@ class OTPService:
 
     def request_otp(self, *, phone: str, purpose: str, ip: str | None, user_agent: str | None) -> OTPCode:
         now = datetime.now(tz=timezone.utc)
+        normalized_phone = self._normalize_phone(phone)
         window_start = now - timedelta(hours=1)
 
-        phone_count = (
-            self.db.query(func.count(OTPCode.id))
-            .filter(OTPCode.phone == phone, OTPCode.created_at >= window_start)
-            .scalar()
-        )
-        if phone_count and phone_count >= self.settings.OTP_RATE_LIMIT_PER_HOUR:
-            raise exceptions.RateLimitExceeded("OTP request limit reached for this phone")
+        skip_rate_limit = normalized_phone in self._rate_limit_bypass
 
-        if ip:
-            ip_count = (
+        if not skip_rate_limit:
+            phone_count = (
                 self.db.query(func.count(OTPCode.id))
-                .filter(OTPCode.ip == ip, OTPCode.created_at >= window_start)
+                .filter(OTPCode.phone == phone, OTPCode.created_at >= window_start)
                 .scalar()
             )
-            if ip_count and ip_count >= self.settings.OTP_RATE_LIMIT_PER_HOUR:
-                raise exceptions.RateLimitExceeded("OTP request limit reached for this IP")
+            if phone_count and phone_count >= self.settings.OTP_RATE_LIMIT_PER_HOUR:
+                raise exceptions.RateLimitExceeded("OTP request limit reached for this phone")
+
+            if ip:
+                ip_count = (
+                    self.db.query(func.count(OTPCode.id))
+                    .filter(OTPCode.ip == ip, OTPCode.created_at >= window_start)
+                    .scalar()
+                )
+                if ip_count and ip_count >= self.settings.OTP_RATE_LIMIT_PER_HOUR:
+                    raise exceptions.RateLimitExceeded("OTP request limit reached for this IP")
+        else:
+            logger.debug("Rate limit bypassed for phone %s", phone)
 
         code = self._generate_code()
         otp = OTPCode(
@@ -74,18 +92,6 @@ class OTPService:
             .first()
         )
         if not otp:
-            if self.settings.OTP_STATIC_CODE and code == self.settings.OTP_STATIC_CODE:
-                # Create a synthetic OTP record so downstream logging/token issuance logic still works.
-                otp = OTPCode(
-                    phone=phone,
-                    code=code,
-                    purpose=purpose,
-                    expires_at=now + timedelta(minutes=self.settings.OTP_EXPIRATION_MINUTES),
-                    is_used=True,
-                )
-                self.db.add(otp)
-                self.db.flush()
-                return otp
             raise exceptions.OTPInvalid("Invalid OTP code")
         expires_at = otp.expires_at
         if expires_at.tzinfo is None:
@@ -100,7 +106,38 @@ class OTPService:
         self.db.flush()
         return otp
 
+    def _send_otp(self, *, phone: str, code: str) -> None:
+        message = self.settings.ESKIZ_SMS_TEMPLATE.format(code=code)
+
+        if self.settings.SMS_DRY_RUN:
+            self.sms_logger.info(
+                "DRY-RUN OTP SMS | phone=%s | code=%s | message=\"%s\"",
+                phone,
+                code,
+                message,
+            )
+            return
+
+        if not self._sms_provider:
+            raise exceptions.OTPDeliveryFailed("SMS provider is not configured")
+
+        try:
+            result = self._sms_provider.send_text(phone=phone, message=message)
+        except exceptions.SMSDeliveryError as exc:
+            raise exceptions.OTPDeliveryFailed("Failed to deliver OTP SMS") from exc
+
+        self.sms_logger.info(
+            "OTP SMS sent | phone=%s | code=%s | message=\"%s\" | provider=%s | status=%s | provider_message_id=%s",
+            phone,
+            code,
+            message,
+            result.provider,
+            result.provider_status,
+            result.provider_message_id,
+        )
+        if result.meta:
+            self.sms_logger.debug("OTP SMS response meta | phone=%s | meta=%s", phone, result.meta)
+
     @staticmethod
-    def _send_otp(*, phone: str, code: str) -> None:
-        # Dummy implementation - replace with real SMS provider
-        logger.info("Sending OTP %s to phone %s", code, phone)
+    def _normalize_phone(phone: str) -> str:
+        return phone.strip().replace(" ", "")

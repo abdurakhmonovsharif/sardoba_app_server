@@ -52,7 +52,8 @@ alembic upgrade head
 ```
 
 ## Configuration Notes
-- Set `OTP_STATIC_CODE` in your `.env` file to control the static OTP sent to clients (defaults to `1234` for local setups).
+- OTP codes are random by default; set `OTP_STATIC_CODE` in your `.env` only if you need a fixed value for debugging.
+- Use `OTP_RATE_LIMIT_BYPASS_PHONES` (comma separated) to exempt numbers such as `+99893143443` from OTP request throttling.
 
 ## Folder Structure
 ```

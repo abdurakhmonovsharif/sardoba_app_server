@@ -24,15 +24,20 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=30, ge=1)
     REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=14, ge=1)
 
-    OTP_STATIC_CODE: Optional[str] = Field(default="1234", env="OTP_STATIC_CODE")
+    OTP_STATIC_CODE: Optional[str] = Field(default=None, env="OTP_STATIC_CODE")
     OTP_LENGTH: int = Field(default=6, ge=4, le=8)
     OTP_EXPIRATION_MINUTES: int = Field(default=5, ge=1)
     OTP_RATE_LIMIT_PER_HOUR: int = Field(default=5, ge=1)
+    OTP_RATE_LIMIT_BYPASS_PHONES: list[str] = Field(
+        default_factory=lambda: ["+998931434413"], env="OTP_RATE_LIMIT_BYPASS_PHONES"
+    )
 
     PASSWORD_HASHING_ROUNDS: int = Field(default=12, ge=4)
 
     LOG_LEVEL: str = Field(default="INFO")
     ENVIRONMENT: str = Field(default="development")
+    LOG_FILE_PATH: str | None = Field(default="logs/app.log", env="LOG_FILE_PATH")
+    SMS_DRY_RUN: bool = Field(default=False, env="SMS_DRY_RUN")
 
     CORS_ORIGINS: list[AnyHttpUrl] | list[str] = Field(default_factory=list)
 
@@ -40,10 +45,25 @@ class Settings(BaseSettings):
     DEFAULT_ADMIN_PHONE: str = Field(default="+998931434413", env="DEFAULT_ADMIN_PHONE")
     DEFAULT_ADMIN_PASSWORD: str = Field(default="admin123", env="DEFAULT_ADMIN_PASSWORD")
 
+    ESKIZ_LOGIN: str = Field(..., env="ESKIZ_LOGIN")
+    ESKIZ_PASSWORD: str = Field(..., env="ESKIZ_PASSWORD")
+    ESKIZ_FROM_WHOM: str = Field(default="4546", env="ESKIZ_FROM_WHOM")
+    ESKIZ_SMS_TEMPLATE: str = Field(
+        default="Kod podtverjdeniya dlya vhoda v sistemu Restoran Sardoba - {code}. Pozhaluysta ne peredavayte drugim.",
+        env="ESKIZ_SMS_TEMPLATE",
+    )
+
     class Config:
         case_sensitive = True
         env_file = str(ENV_FILE)
         env_file_encoding = "utf-8"
+
+        @classmethod
+        def parse_env_var(cls, field_name: str, raw_value: str):
+            if field_name == "OTP_RATE_LIMIT_BYPASS_PHONES":
+                # Let validator handle comma-separated strings instead of forcing JSON.
+                return raw_value
+            return super().parse_env_var(field_name, raw_value)
 
     @validator("CORS_ORIGINS", pre=True)
     def assemble_cors_origins(cls, v: str | list[str]) -> list[str]:
@@ -54,6 +74,14 @@ class Settings(BaseSettings):
                 return ["*"]
             # Otherwise split by comma
             return [origin.strip() for origin in v.split(",") if origin.strip()]
+        return v
+
+    @validator("OTP_RATE_LIMIT_BYPASS_PHONES", pre=True)
+    def parse_rate_limit_bypass_phones(cls, v: str | list[str] | None) -> list[str]:
+        if not v:
+            return []
+        if isinstance(v, str):
+            return [phone.strip() for phone in v.split(",") if phone.strip()]
         return v
 
 

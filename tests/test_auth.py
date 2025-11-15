@@ -1,3 +1,4 @@
+from app.core.config import get_settings
 from app.core.security import create_password_hash
 from app.models import OTPCode, Staff, StaffRole, User
 
@@ -21,7 +22,8 @@ def test_client_otp_flow(client, db_session):
         .first()
     )
     assert otp is not None
-    assert otp.code == "1234"
+    settings = get_settings()
+    assert len(otp.code) == settings.OTP_LENGTH
 
     verify_response = client.post(
         "/api/v1/auth/client/verify-otp",
