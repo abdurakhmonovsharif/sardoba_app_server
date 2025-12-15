@@ -2,13 +2,24 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_manager, get_db, get_token_payload
+from app.core.localization import localize_message
 from app.models import AuthActorType, Staff, User, CashbackTransaction, SardobaBranch
-from app.schemas import CashbackCreate, CashbackHistoryResponse, CashbackRead, LoyaltySummary
+from app.schemas import (
+    CashbackCreate,
+    CashbackHistoryResponse,
+    CashbackRead,
+    CashbackUseRequest,
+    CashbackUseResponse,
+    TopUserLeaderboardRow,
+    LoyaltyAnalytics,
+    LoyaltySummary,
+    WaiterLeaderboardRow,
+)
 from app.services import CashbackService
+from app.services import exceptions as service_exceptions
 from typing import Optional
 
 router = APIRouter(prefix="/cashback", tags=["cashback"])
-
 
 @router.post("/add", response_model=CashbackRead)
 def add_cashback(
@@ -28,6 +39,26 @@ def add_cashback(
     return CashbackRead.from_orm(cashback)
 
 
+@router.post("/use", response_model=CashbackUseResponse)
+def use_cashback(
+    payload: CashbackUseRequest,
+    manager: Staff = Depends(get_current_manager),
+    db: Session = Depends(get_db),
+) -> CashbackUseResponse:
+    service = CashbackService(db)
+    try:
+        balance = service.check_cashback_payment(user_id=payload.user_id, amount=payload.amount)
+    except service_exceptions.NotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=localize_message(str(exc))) from exc
+    except service_exceptions.ServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=localize_message(str(exc))) from exc
+    return CashbackUseResponse(
+        can_use_cashback=True,
+        balance=balance,
+        message=localize_message("Cashback payment is available."),
+    )
+
+
 @router.get("/user/{user_id}", response_model=CashbackHistoryResponse)
 def get_user_cashback(
     user_id: int,
@@ -37,22 +68,22 @@ def get_user_cashback(
     actor_type = payload.get("actor_type")
     subject_raw = payload.get("sub")
     if subject_raw is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=localize_message("Invalid token"))
     subject_id = int(subject_raw)
 
     if actor_type == AuthActorType.CLIENT.value and subject_id != user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=localize_message("Forbidden"))
 
     if actor_type == AuthActorType.STAFF.value:
         staff = db.query(Staff).filter(Staff.id == subject_id).first()
         if not staff:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Staff not found")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=localize_message("Staff not found"))
     elif actor_type != AuthActorType.CLIENT.value:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=localize_message("Forbidden"))
 
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=localize_message("User not found"))
 
     service = CashbackService(db)
     entries = service.get_user_cashbacks(user_id=user.id)
@@ -64,19 +95,35 @@ def get_user_cashback(
 
 
 
-@router.get("/loyalty-analytics", response_model=dict)
+@router.get("/loyalty-analytics", response_model=LoyaltyAnalytics)
 def loyalty_analytics(
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=10, ge=1, le=100),
     manager: Staff = Depends(get_current_manager),
     db: Session = Depends(get_db),
 ):
-    """Return loyalty summary for users (paginated)."""
-    total = db.query(User).count()
-    users = db.query(User).order_by(User.id).offset((page - 1) * page_size).limit(page_size).all()
+    """Return aggregated loyalty analytics for dashboards."""
     service = CashbackService(db)
-    items = [service.loyalty_summary(user=u) for u in users]
-    return {"pagination": {"page": page, "size": page_size, "total": total}, "items": items}
+    return service.loyalty_analytics_summary()
+
+
+@router.get("/waiter-stats", response_model=list[WaiterLeaderboardRow])
+def waiter_leaderboard(
+    manager: Staff = Depends(get_current_manager),
+    db: Session = Depends(get_db),
+):
+    service = CashbackService(db)
+    rows = service.waiter_leaderboard()
+    return [WaiterLeaderboardRow(**row) for row in rows]
+
+
+@router.get("/top-users", response_model=list[TopUserLeaderboardRow])
+def top_users_leaderboard(
+    manager: Staff = Depends(get_current_manager),
+    db: Session = Depends(get_db),
+    limit: int = Query(default=10, ge=1, le=50),
+):
+    service = CashbackService(db)
+    rows = service.top_users_leaderboard(limit=limit)
+    return [TopUserLeaderboardRow(**row) for row in rows]
 
 
 

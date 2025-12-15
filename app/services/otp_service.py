@@ -22,6 +22,12 @@ class OTPService:
         self._rate_limit_bypass = {
             self._normalize_phone(phone) for phone in self.settings.OTP_RATE_LIMIT_BYPASS_PHONES
         }
+        self._demo_phone = (
+            self._normalize_phone(self.settings.DEMO_PHONE)
+            if self.settings.DEMO_PHONE
+            else None
+        )
+        self._demo_code = self.settings.OTP_DEMO_CODE or "1111"
         self._sms_provider: EskizSMSProvider | None = None
         if not self.settings.SMS_DRY_RUN:
             self._sms_provider = EskizSMSProvider(
@@ -38,18 +44,24 @@ class OTPService:
     def request_otp(self, *, phone: str, purpose: str, ip: str | None, user_agent: str | None) -> OTPCode:
         now = datetime.now(tz=timezone.utc)
         normalized_phone = self._normalize_phone(phone)
-        window_start = now - timedelta(hours=1)
+        normalized_purpose = (purpose or "").lower()
+        window_minutes = self.settings.RATE_LIMIT_BLOCK_MINUTES
+        window_start = now - timedelta(minutes=window_minutes)
+        block_message = f"Ko'p so'rov jonatildi, {window_minutes} daqiqadan keyin yana urinib ko'ring."
 
-        skip_rate_limit = normalized_phone in self._rate_limit_bypass
+        is_demo_phone = self._demo_phone is not None and normalized_phone == self._demo_phone
+        skip_rate_limit = normalized_phone in self._rate_limit_bypass or is_demo_phone
+        enforce_rate_limit = not skip_rate_limit and normalized_purpose != "register"
 
-        if not skip_rate_limit:
+        if enforce_rate_limit:
+            # Apply rate-limit window to non-registration flows only.
             phone_count = (
                 self.db.query(func.count(OTPCode.id))
                 .filter(OTPCode.phone == phone, OTPCode.created_at >= window_start)
                 .scalar()
             )
             if phone_count and phone_count >= self.settings.OTP_RATE_LIMIT_PER_HOUR:
-                raise exceptions.RateLimitExceeded("OTP request limit reached for this phone")
+                raise exceptions.RateLimitExceeded(block_message)
 
             if ip:
                 ip_count = (
@@ -58,11 +70,11 @@ class OTPService:
                     .scalar()
                 )
                 if ip_count and ip_count >= self.settings.OTP_RATE_LIMIT_PER_HOUR:
-                    raise exceptions.RateLimitExceeded("OTP request limit reached for this IP")
+                    raise exceptions.RateLimitExceeded(block_message)
         else:
             logger.debug("Rate limit bypassed for phone %s", phone)
 
-        code = self._generate_code()
+        code = self._demo_code if is_demo_phone else self._generate_code()
         otp = OTPCode(
             phone=phone,
             code=code,
@@ -74,7 +86,10 @@ class OTPService:
         self.db.add(otp)
         self.db.flush()
 
-        self._send_otp(phone=phone, code=code)
+        if is_demo_phone:
+            self.sms_logger.info("Demo OTP generated | phone=%s | code=%s", phone, code)
+        else:
+            self._send_otp(phone=phone, code=code)
         return otp
 
     def verify_otp(self, *, phone: str, code: str, purpose: str) -> OTPCode:
@@ -124,7 +139,7 @@ class OTPService:
         try:
             result = self._sms_provider.send_text(phone=phone, message=message)
         except exceptions.SMSDeliveryError as exc:
-            raise exceptions.OTPDeliveryFailed("Failed to deliver OTP SMS") from exc
+            raise exceptions.OTPDeliveryFailed("SMS jo'natib bo'lmadi yoki telefon raqamni noto'g'ri") from exc
 
         self.sms_logger.info(
             "OTP SMS sent | phone=%s | code=%s | message=\"%s\" | provider=%s | status=%s | provider_message_id=%s",

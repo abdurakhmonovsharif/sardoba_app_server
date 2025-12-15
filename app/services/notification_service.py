@@ -9,8 +9,11 @@ class NotificationService:
     def __init__(self, db: Session):
         self.db = db
 
-    def list_notifications(self) -> list[Notification]:
-        return self.db.query(Notification).order_by(Notification.created_at.desc()).all()
+    def list_notifications(self, *, page: int, size: int) -> tuple[int, list[Notification]]:
+        query = self.db.query(Notification).order_by(Notification.created_at.desc())
+        total = query.count()
+        items = query.offset((page - 1) * size).limit(size).all()
+        return total, items
 
     def create_notification(self, *, actor: Staff, data: dict) -> Notification:
         self._ensure_manager(actor)

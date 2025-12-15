@@ -28,7 +28,13 @@ EXCEPTION
 END $$;
 
 DO $$ BEGIN
-    CREATE TYPE user_level AS ENUM ('SILVER', 'GOLD', 'PREMIUM');
+    CREATE TYPE user_level AS ENUM ('SILVER', 'GOLD', 'PREMIUM', 'VIP');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    ALTER TYPE user_level ADD VALUE IF NOT EXISTS 'VIP';
 EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
@@ -65,6 +71,12 @@ CREATE TABLE IF NOT EXISTS users (
     date_of_birth DATE NULL,
     profile_photo_url VARCHAR(512) NULL,
     level user_level NOT NULL DEFAULT 'SILVER',
+    iiko_wallet_id VARCHAR(64) UNIQUE NULL,
+    iiko_customer_id VARCHAR(64) UNIQUE NULL,
+    email VARCHAR(320) UNIQUE NULL,
+    gender VARCHAR(16) NULL,
+    is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+    deleted_at TIMESTAMP WITH TIME ZONE NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
 );
@@ -72,13 +84,37 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);
 CREATE INDEX IF NOT EXISTS idx_users_waiter_id ON users(waiter_id);
 
+CREATE TABLE IF NOT EXISTS deleted_phones (
+    id SERIAL PRIMARY KEY,
+    real_phone VARCHAR(20) NOT NULL,
+    deleted_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    user_id INTEGER NULL REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_deleted_phones_real_phone ON deleted_phones(real_phone);
+CREATE INDEX IF NOT EXISTS idx_deleted_phones_user_id ON deleted_phones(user_id);
+
 -- Cashback balances table
 CREATE TABLE IF NOT EXISTS cashback_balances (
     user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     balance NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+    points NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
 );
+
+-- Cards table
+CREATE TABLE IF NOT EXISTS cards (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    card_number VARCHAR(32) UNIQUE NOT NULL,
+    card_track VARCHAR(64) UNIQUE NOT NULL,
+    iiko_card_id VARCHAR(64) NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cards_user_id ON cards(user_id);
 
 -- Cashback transactions table
 CREATE TABLE IF NOT EXISTS cashback_transactions (
@@ -89,6 +125,7 @@ CREATE TABLE IF NOT EXISTS cashback_transactions (
     branch_id INTEGER NULL,
     source cashback_source NOT NULL,
     balance_after NUMERIC(12, 2) NOT NULL,
+    iiko_event_id VARCHAR(128) UNIQUE NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
 );
 
@@ -131,6 +168,34 @@ CREATE TABLE IF NOT EXISTS notifications (
     description TEXT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS notification_device_tokens (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_token VARCHAR(255) UNIQUE,
+    device_type VARCHAR(16) NOT NULL,
+    language VARCHAR(8) NOT NULL DEFAULT 'ru',
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_device_tokens_user_id ON notification_device_tokens(user_id);
+
+CREATE TABLE IF NOT EXISTS user_notifications (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    type VARCHAR(64),
+    payload JSONB NULL,
+    language VARCHAR(8) NOT NULL DEFAULT 'ru',
+    is_read BOOLEAN NOT NULL DEFAULT FALSE,
+    is_sent BOOLEAN NOT NULL DEFAULT FALSE,
+    sent_at TIMESTAMP WITH TIME ZONE NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_notifications_user_id ON user_notifications(user_id);
 
 -- News table
 CREATE TABLE IF NOT EXISTS news (

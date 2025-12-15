@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_manager, get_db
+from app.core.localization import localize_message
 from app.models import Staff
 from app.schemas import (
     CategoryCreate,
@@ -59,7 +60,7 @@ def update_category(
     try:
         category = service.update_category(actor=manager, category_id=category_id, data=updates)
     except service_exceptions.NotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=localize_message(str(exc))) from exc
     return CategoryRead.from_orm(category)
 
 
@@ -73,7 +74,7 @@ def delete_category(
     try:
         service.delete_category(actor=manager, category_id=category_id)
     except service_exceptions.NotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=localize_message(str(exc))) from exc
 
 
 @router.get("/products", response_model=list[ProductRead])
@@ -96,7 +97,7 @@ def create_product(
     try:
         product = service.create_product(actor=manager, data=payload.dict())
     except service_exceptions.NotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=localize_message(str(exc))) from exc
     return ProductRead.from_orm(product)
 
 
@@ -112,7 +113,7 @@ def update_product(
     try:
         product = service.update_product(actor=manager, product_id=product_id, data=updates)
     except service_exceptions.NotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=localize_message(str(exc))) from exc
     return ProductRead.from_orm(product)
 
 
@@ -126,4 +127,14 @@ def delete_product(
     try:
         service.delete_product(actor=manager, product_id=product_id)
     except service_exceptions.NotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=localize_message(str(exc))) from exc
+
+
+@router.post("/sync", response_model=dict)
+def sync_catalog_with_iiko(
+    manager: Staff = Depends(get_current_manager),
+    db: Session = Depends(get_db),
+):
+    service = CatalogService(db)
+    result = service.sync_from_iiko(actor=manager)
+    return result

@@ -28,9 +28,13 @@ class Settings(BaseSettings):
     OTP_LENGTH: int = Field(default=6, ge=4, le=8)
     OTP_EXPIRATION_MINUTES: int = Field(default=5, ge=1)
     OTP_RATE_LIMIT_PER_HOUR: int = Field(default=5, ge=1)
+    RATE_LIMIT_BLOCK_MINUTES: int = Field(default=15, ge=1)
+    LOGIN_RATE_LIMIT_PER_WINDOW: int = Field(default=5, ge=1)
     OTP_RATE_LIMIT_BYPASS_PHONES: list[str] = Field(
         default_factory=lambda: ["+998931434413"], env="OTP_RATE_LIMIT_BYPASS_PHONES"
     )
+    DEMO_PHONE: Optional[str] = Field(default=None, env="DEMO_PHONE")
+    OTP_DEMO_CODE: str = Field(default="1111", env="OTP_DEMO_CODE")
 
     PASSWORD_HASHING_ROUNDS: int = Field(default=12, ge=4)
 
@@ -38,6 +42,13 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = Field(default="development")
     LOG_FILE_PATH: str | None = Field(default="logs/app.log", env="LOG_FILE_PATH")
     SMS_DRY_RUN: bool = Field(default=False, env="SMS_DRY_RUN")
+
+    IIKO_API_BASE_URL: str = Field(
+        default="https://api-ru.iiko.services",
+        env="IIKO_API_BASE_URL",
+    )
+    IIKO_API_LOGIN: str = Field(..., env="IIKO_API_LOGIN")
+    IIKO_ORGANIZATION_ID: str = Field(..., env="IIKO_ORGANIZATION_ID")
 
     CORS_ORIGINS: list[AnyHttpUrl] | list[str] = Field(default_factory=list)
 
@@ -52,6 +63,9 @@ class Settings(BaseSettings):
         default="Kod podtverjdeniya dlya vhoda v sistemu Restoran Sardoba - {code}. Pozhaluysta ne peredavayte drugim.",
         env="ESKIZ_SMS_TEMPLATE",
     )
+
+    FCM_PROJECT_ID: str | None = Field(default=None, env="FCM_PROJECT_ID")
+    FCM_SERVICE_ACCOUNT_FILE: str | None = Field(default=None, env="FCM_SERVICE_ACCOUNT_FILE")
 
     class Config:
         case_sensitive = True

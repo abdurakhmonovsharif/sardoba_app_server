@@ -16,7 +16,9 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column("users", sa.Column("profile_photo_url", sa.String(length=512), nullable=True))
+    op.execute(
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_photo_url VARCHAR(512)"
+    )
 
 
 def downgrade():

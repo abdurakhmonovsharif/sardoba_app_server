@@ -46,7 +46,7 @@ def create_app() -> FastAPI:
         )
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={"detail": exc.errors(), "body": exc.body},
+            content={"detail": exc.errors(), "body": body_text},
         )
 
     api_router = get_api_router()

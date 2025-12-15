@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DECIMAL, DateTime, Enum, ForeignKey, Integer
+from sqlalchemy import DECIMAL, DateTime, Enum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampMixin
@@ -19,14 +19,14 @@ class CashbackBalance(TimestampMixin, Base):
     __tablename__ = "cashback_balances"
 
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
-    balance: Mapped[Decimal] = mapped_column(DECIMAL(12, 2), default=Decimal("0.00"))
+    balance: Mapped[Decimal] = mapped_column(DECIMAL(12, 2), default=Decimal("0.00"), server_default="0")
+    points: Mapped[Decimal] = mapped_column(DECIMAL(12, 2), default=Decimal("0.00"), server_default="0")
 
     user: Mapped["User"] = relationship("User", back_populates="cashback_wallet")
 
 
 class CashbackTransaction(Base):
     __tablename__ = "cashback_transactions"
-
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     staff_id: Mapped[int | None] = mapped_column(ForeignKey("staff.id"), nullable=True)
@@ -34,9 +34,10 @@ class CashbackTransaction(Base):
     branch_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source: Mapped[CashbackSource] = mapped_column(Enum(CashbackSource, name="cashback_source"))
     balance_after: Mapped[Decimal] = mapped_column(DECIMAL(12, 2))
+    iiko_event_id: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True)
+    iiko_uoc_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(tz=timezone.utc)
     )
-
     user: Mapped["User"] = relationship("User", back_populates="cashback_transactions")
     staff: Mapped["Staff"] = relationship("Staff")

@@ -17,9 +17,7 @@ depends_on = None
 
 def upgrade():
     op.add_column("users", sa.Column("date_of_birth", sa.Date(), nullable=True))
-    op.add_column("users", sa.Column("profile_photo_url", sa.String(length=512), nullable=True))
 
 
 def downgrade():
-    op.drop_column("users", "profile_photo_url")
     op.drop_column("users", "date_of_birth")

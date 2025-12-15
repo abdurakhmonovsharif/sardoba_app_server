@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.core.cache import cache
 from app.core.dependencies import get_current_manager, get_db
+from app.core.localization import localize_message
 from app.models import Staff
 from app.schemas import NewsCreate, NewsRead, NewsUpdate
 from app.services import NewsService
@@ -47,7 +48,7 @@ def update_news(
     try:
         news = service.update(actor=manager, news_id=news_id, data=data)
     except service_exceptions.NotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=localize_message(str(exc))) from exc
     return NewsRead.from_orm(news)
 
 
@@ -61,4 +62,4 @@ def delete_news(
     try:
         service.delete(actor=manager, news_id=news_id)
     except service_exceptions.NotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=localize_message(str(exc))) from exc

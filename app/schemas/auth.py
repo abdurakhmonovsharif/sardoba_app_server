@@ -71,6 +71,7 @@ class StaffRead(BaseModel):
     role: StaffRole
     branch_id: Optional[SardobaBranch]
     referral_code: Optional[str]
+    clients_count: Optional[int] = None
     created_at: datetime
     updated_at: datetime
 
@@ -83,6 +84,20 @@ class WaiterCreateRequest(BaseModel):
     phone: str = Field(..., regex=r"^\+?\d{7,15}$")
     password: str = Field(..., min_length=6)
     branch_id: Optional[SardobaBranch] = None
+    referral_code: Optional[str] = Field(default=None, max_length=12)
+
+    @validator("phone", pre=True)
+    def normalize_phone(cls, value: str) -> str:
+        if value is None:
+            raise ValueError("phone cannot be empty")
+        text = str(value).strip()
+        if not text:
+            raise ValueError("phone cannot be empty")
+        has_plus = text.startswith("+")
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if not digits:
+            raise ValueError("phone must contain digits")
+        return f"+{digits}" if has_plus else digits
 
 
 class WaiterUpdateRequest(BaseModel):
@@ -90,11 +105,12 @@ class WaiterUpdateRequest(BaseModel):
     phone: Optional[str] = Field(default=None, regex=r"^\+?\d{7,15}$")
     password: Optional[str] = Field(default=None, min_length=6)
     branch_id: Optional[SardobaBranch] = None
+    referral_code: Optional[str] = Field(default=None, max_length=12)
 
     @root_validator(pre=True)
     def check_at_least_one(cls, values):
         data = values or {}
-        if not any(field in data for field in ("name", "phone", "password", "branch_id")):
+        if not any(field in data for field in ("name", "phone", "password", "branch_id", "referral_code")):
             raise ValueError("At least one field must be provided for update")
         return values
 

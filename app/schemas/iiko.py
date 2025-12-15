@@ -21,6 +21,7 @@ class IikoWebhookPayload(BaseModel):
     walletId: str | None = None
     id: str | None = None
     customerId: str | None = None
+    uocId: str | None = None
     transactionType: IikoTransactionType
     notificationType: int | None = None
     orderId: str | None = None
@@ -29,6 +30,7 @@ class IikoWebhookPayload(BaseModel):
     terminalGroupId: str | None = None
     subscriptionPassword: str | None = None
     changedOn: str | None = None
+    phone: str | None = None
 
 
 class IikoUserLookup(BaseModel):

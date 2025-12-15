@@ -1,8 +1,11 @@
+from decimal import Decimal
+
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.cache import cache, invalidate_cache
 from app.models import Category, Product, Staff, StaffRole
 
+from .ikko_myresto_menu import get_simplified_menu
 from . import exceptions
 
 CATEGORY_NAMESPACE = "categories"
@@ -17,7 +20,17 @@ class CatalogService:
     @cache(ttl=60, namespace=CATEGORY_NAMESPACE, key_builder=lambda self: "all")
     def get_cached_categories(self) -> list[dict]:
         categories = self.db.query(Category).order_by(Category.name).all()
-        return [self._serialize_category(cat) for cat in categories]
+        result: list[dict] = []
+        for cat in categories:
+            first_product_image = (
+                self.db.query(Product.image_url)
+                .filter(Product.category_id == cat.id, Product.image_url.isnot(None))
+                .order_by(Product.id)
+                .first()
+            )
+            fallback_image = first_product_image[0] if first_product_image else None
+            result.append(self._serialize_category(cat, fallback_image))
+        return result
 
     @cache(ttl=60, namespace=PRODUCT_NAMESPACE, key_builder=lambda self, category_id=None: f"category:{category_id or 'all'}")
     def get_cached_products(self, category_id: int | None = None) -> list[dict]:
@@ -104,6 +117,101 @@ class CatalogService:
         self.db.commit()
         self._invalidate_products()
 
+    def sync_from_iiko(self, *, actor: Staff) -> dict:
+        """Synchronize categories and products from iiko/MyResto menu payload."""
+        self._ensure_manager(actor)
+        menu = get_simplified_menu()
+        categories_payload = menu.get("categories") or []
+
+        existing_categories = {
+            cat.name: cat
+            for cat in self.db.query(Category).options(selectinload(Category.products)).all()
+        }
+
+        created_categories = updated_categories = 0
+        created_products = updated_products = removed_products = 0
+
+        for category_data in categories_payload:
+            cat_name = (category_data.get("name") or "").strip()
+            if not cat_name:
+                continue
+            cat_image = None
+
+            category = existing_categories.get(cat_name)
+            if category is None:
+                category = Category(name=cat_name, image_url=cat_image)
+                self.db.add(category)
+                self.db.flush()
+                created_categories += 1
+            else:
+                if cat_image is not None and category.image_url != cat_image:
+                    category.image_url = cat_image
+                    updated_categories += 1
+
+            existing_products = {prod.name: prod for prod in (category.products or [])}
+            seen_products: set[int] = set()
+
+            for item in category_data.get("items") or []:
+                prod_name = (item.get("name") or "").strip()
+                if not prod_name:
+                    continue
+                prices = item.get("prices") or []
+                price_values = [
+                    p.get("price")
+                    for p in prices
+                    if isinstance(p, dict) and p.get("price") is not None
+                ]
+                if not price_values:
+                    continue
+                price_value = Decimal(str(price_values[0]))
+                image_url = None
+                images = item.get("images") or []
+                if images:
+                    image_url = images[0]
+
+                product = existing_products.get(prod_name)
+                if product is None:
+                    product = Product(
+                        name=prod_name,
+                        category_id=category.id,
+                        price=price_value,
+                        image_url=image_url,
+                    )
+                    self.db.add(product)
+                    self.db.flush()
+                    created_products += 1
+                else:
+                    changed = False
+                    if product.price != price_value:
+                        product.price = price_value
+                        changed = True
+                    if image_url is not None and product.image_url != image_url:
+                        product.image_url = image_url
+                        changed = True
+                    if product.category_id != category.id:
+                        product.category_id = category.id
+                        changed = True
+                    if changed:
+                        updated_products += 1
+                    self.db.add(product)
+                seen_products.add(product.id)
+
+            for prod in list(category.products or []):
+                if prod.id not in seen_products:
+                    self.db.delete(prod)
+                    removed_products += 1
+
+        self.db.commit()
+        self._invalidate()
+        return {
+            "status": "ok",
+            "categories_created": created_categories,
+            "categories_updated": updated_categories,
+            "products_created": created_products,
+            "products_updated": updated_products,
+            "products_removed": removed_products,
+        }
+
     def _invalidate(self) -> None:
         invalidate_cache(CATEGORY_NAMESPACE)
         self._invalidate_products()
@@ -112,6 +220,7 @@ class CatalogService:
     def _invalidate_products() -> None:
         invalidate_cache(PRODUCT_NAMESPACE)
         invalidate_cache(CATALOG_FULL_NAMESPACE)
+        invalidate_cache(CATEGORY_NAMESPACE)
 
     def _get_category(self, category_id: int) -> Category:
         category = self.db.query(Category).filter(Category.id == category_id).first()
@@ -131,11 +240,11 @@ class CatalogService:
             raise exceptions.AuthorizationError("Only managers can perform this action")
 
     @staticmethod
-    def _serialize_category(category: Category) -> dict:
+    def _serialize_category(category: Category, fallback_image: str | None = None) -> dict:
         return {
             "id": category.id,
             "name": category.name,
-            "image_url": category.image_url,
+            "image_url": category.image_url or fallback_image,
         }
 
     @staticmethod

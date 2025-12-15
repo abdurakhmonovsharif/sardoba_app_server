@@ -17,7 +17,7 @@ class IikoService:
 
     def __init__(self):
         self.settings = get_settings()
-        self._client = httpx.Client(base_url=self.settings.IIKO_API_BASE_URL, timeout=10.0)
+        self._client = httpx.Client(base_url=self.settings.IIKO_API_BASE_URL, timeout=httpx.Timeout(5.0))
 
     def _cache_key(self) -> str:
         return self.TOKEN_CACHE_KEY
@@ -68,6 +68,23 @@ class IikoService:
         token = self._get_token(force=force_refresh)
         return {"Authorization": f"Bearer {token}"}
 
+    def _send_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        try:
+            return self._client.request(method, path, json=json, headers=headers)
+        except httpx.RequestError as exc:
+            if isinstance(exc, httpx.TimeoutException):
+                logger.warning("Iiko request %s %s timed out", method, path)
+                raise exceptions.ServiceError("Iiko request timed out") from exc
+            logger.warning("Iiko request %s %s failed: %s", method, path, exc)
+            raise exceptions.ServiceError("Iiko request failed") from exc
+
     def _request(
         self,
         method: str,
@@ -78,10 +95,10 @@ class IikoService:
     ) -> dict[str, Any]:
         headers = self._auth_headers()
         logger.debug("Iiko request %s %s %s", method, path, json)
-        response = self._client.request(method, path, json=json, headers=headers)
+        response = self._send_request(method, path, json=json, headers=headers)
         if response.status_code in (401, 403) and retry:
             headers = self._auth_headers(force_refresh=True)
-            response = self._client.request(method, path, json=json, headers=headers)
+            response = self._send_request(method, path, json=json, headers=headers)
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -95,6 +112,7 @@ class IikoService:
             raise
         if not response.content:
             return {}
+        print(response.json())
         return response.json()
 
     def get_customer_by_phone(self, phone: str) -> dict[str, Any] | None:

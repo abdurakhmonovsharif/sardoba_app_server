@@ -36,3 +36,4 @@ class UserLevel(str, Enum):
     SILVER = "SILVER"
     GOLD = "GOLD"
     PREMIUM = "PREMIUM"
+    VIP = "VIP"

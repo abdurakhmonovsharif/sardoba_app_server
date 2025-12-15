@@ -1,7 +1,9 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 import logging
 import secrets
 import string
+from typing import Any
 
 from jwt import InvalidTokenError
 from sqlalchemy import func
@@ -13,13 +15,18 @@ from app.core.config import get_settings
 from app.models import (
     AuthAction,
     AuthActorType,
+    AuthLog,
     Staff,
     StaffRole,
     User,
+    CashbackBalance,
 )
 
 from . import exceptions
 from .auth_log_service import log_auth_event
+from .card_service import CardService
+from .iiko_profile_sync_service import IikoProfileSyncService
+from .iiko_service import IikoService
 from .otp_service import OTPService
 
 logger = logging.getLogger(__name__)
@@ -30,6 +37,9 @@ class AuthService:
         self.db = db
         self.settings = get_settings()
         self.otp_service = OTPService(db)
+        self.card_service = CardService(db)
+        self.profile_sync_service = IikoProfileSyncService(db)
+        self.iiko_service = IikoService()
 
     def issue_tokens(self, *, actor_type: AuthActorType, subject_id: int, extra: dict | None = None) -> dict[str, str]:
         claims = extra.copy() if extra else {}
@@ -39,6 +49,17 @@ class AuthService:
         return {"access": access, "refresh": refresh}
 
     def request_client_otp(self, *, phone: str, purpose: str, ip: str | None, user_agent: str | None) -> None:
+        normalized_purpose = (purpose or "").lower()
+        user_exists = self.db.query(User.id).filter(User.phone == phone).first()
+        if normalized_purpose == "register":
+            if user_exists:
+                raise exceptions.ConflictError("Bu telefon raqamda foydalanuvchu mavjud.")
+            self._find_or_create_user_from_iiko(phone)
+        else:
+            if not user_exists:
+                synced_user = self._ensure_user_for_login(phone)
+                if not synced_user:
+                    raise exceptions.NotFoundError("Bu raqam orqali foydalanuvchi yo'q, iltimos akkaunt yaratishni bosing.")
         otp = self.otp_service.request_otp(phone=phone, purpose=purpose, ip=ip, user_agent=user_agent)
         log_auth_event(
             db=self.db,
@@ -75,26 +96,39 @@ class AuthService:
             if waiter is None:
                 raise exceptions.NotFoundError("Invalid waiter referral code")
 
-        user = self.db.query(User).filter(User.phone == phone).first()
-        if not user:
-            if (purpose or "").lower() != "register":
-                raise exceptions.NotFoundError("User not found. Please register first.")
-            user = User(phone=phone, name=name, date_of_birth=date_of_birth)
-            if waiter:
-                user.waiter = waiter
-            self.db.add(user)
+        normalized_purpose = (purpose or "").lower()
+        user = self._find_active_user_by_phone(phone)
+        iiko_customer = self._fetch_iiko_customer(phone)
+
+        if user:
+            self._update_user_profile(user, name, date_of_birth, waiter)
+            if iiko_customer:
+                self._sync_user_with_iiko(user, iiko_customer)
+            elif not user.iiko_customer_id:
+                self._ensure_iiko_customer_safe(user, name=name, date_of_birth=date_of_birth)
         else:
-            if name:
-                user.name = name
-            if waiter and not user.waiter_id:
-                user.waiter = waiter
-            if date_of_birth:
-                user.date_of_birth = date_of_birth
+            if normalized_purpose != "register":
+                raise exceptions.NotFoundError(
+                    "Bu raqam orqali foydalanuvchi topilmadi, iltimos akkaunt yaratishni bosing."
+                )
+            user = self._find_or_create_user_from_iiko(phone)
+            if not user:
+                user = User(phone=phone, name=name, date_of_birth=date_of_birth)
+                if waiter:
+                    user.waiter = waiter
+                self.db.add(user)
+                self.db.flush()
+            if iiko_customer:
+                self._sync_user_with_iiko(user, iiko_customer)
+            else:
+                self._ensure_iiko_customer_safe(user, name=name, date_of_birth=date_of_birth)
 
         self.db.flush()
+        self.profile_sync_service.flush_pending_updates(user)
 
         tokens = self.issue_tokens(actor_type=AuthActorType.CLIENT, subject_id=user.id)
 
+        self.sync_user_from_iiko(user)
         log_auth_event(
             db=self.db,
             actor_type=AuthActorType.CLIENT,
@@ -109,6 +143,263 @@ class AuthService:
         self.db.refresh(user)
         return user, tokens
 
+    def _find_active_user_by_phone(self, phone: str) -> User | None:
+        return (
+            self.db.query(User)
+            .filter(User.phone == phone, User.is_deleted == False)
+            .first()
+        )
+
+    def _update_user_profile(
+        self,
+        user: User,
+        name: str | None,
+        date_of_birth: date | None,
+        waiter: Staff | None,
+    ) -> None:
+        updated = False
+        if name and user.name != name:
+            user.name = name
+            updated = True
+        if date_of_birth and user.date_of_birth != date_of_birth:
+            user.date_of_birth = date_of_birth
+            updated = True
+        if waiter and not user.waiter_id:
+            user.waiter = waiter
+            updated = True
+        if updated:
+            self.db.add(user)
+
+    def _sync_user_with_iiko(self, user: User, payload: dict[str, Any]) -> None:
+        if not payload:
+            return
+        customer_id = payload.get("id") or payload.get("customerId")
+        if customer_id:
+            user.iiko_customer_id = customer_id
+        wallet_id = self._extract_wallet_id(payload)
+        if wallet_id:
+            self._assign_wallet_to_user(user, wallet_id)
+        self._assign_iiko_name_parts(user, payload)
+        iiko_name = self._compose_iiko_name(payload)
+        if iiko_name and not user.name:
+            user.name = iiko_name
+        birthday = self._parse_iiko_birthday(payload.get("birthday"))
+        if birthday and not user.date_of_birth:
+            user.date_of_birth = birthday
+        gender = self._map_iiko_sex(payload.get("sex") or payload.get("gender"))
+        if gender and not user.gender:
+            user.gender = gender
+        if not user.email and payload.get("email"):
+            user.email = payload.get("email")
+        self._sync_cashback_from_wallets(user, payload.get("walletBalances") or [])
+        for card_payload in payload.get("cards") or []:
+            self.card_service.ensure_card_from_iiko(user, card_payload)
+        self.db.add(user)
+
+    def _sync_cashback_from_wallets(self, user: User, wallets: list[dict[str, Any]]) -> None:
+        if not wallets:
+            return
+        target_wallet = next((w for w in wallets if w.get("type") == 1), wallets[0])
+        balance_value = target_wallet.get("balance")
+        if balance_value is None:
+            return
+        balance_decimal = Decimal(str(balance_value))
+        if user.cashback_wallet is None:
+            user.cashback_wallet = CashbackBalance(user_id=user.id, balance=balance_decimal, points=Decimal("0"))
+        else:
+            user.cashback_wallet.balance = balance_decimal
+        self.db.add(user.cashback_wallet)
+
+    def sync_user_from_iiko(self, user: User) -> None:
+        if not user.phone:
+            return
+        customer = self._fetch_iiko_customer(user.phone)
+        if not customer:
+            return
+        self._sync_user_with_iiko(user, customer)
+        self.db.flush()
+
+    def _assign_wallet_to_user(self, user: User, wallet_id: str) -> None:
+        conflict = (
+            self.db.query(User)
+            .filter(User.iiko_wallet_id == wallet_id, User.id != user.id)
+            .first()
+        )
+        if conflict:
+            conflict.iiko_wallet_id = None
+            self.db.add(conflict)
+            # flush the conflict update before assigning the wallet to avoid unique constraint races
+            self.db.flush()
+        user.iiko_wallet_id = wallet_id
+
+    def _extract_wallet_id(self, payload: dict[str, Any]) -> str | None:
+        for wallet in payload.get("walletBalances", []) or []:
+            wallet_id = wallet.get("id") or wallet.get("walletId")
+            if wallet_id:
+                return wallet_id
+        return None
+
+    def _compose_iiko_name(self, payload: dict[str, Any]) -> str | None:
+        if not payload:
+            return None
+        candidates = []
+        for key in ("name", "middleName", "surname"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned:
+                    candidates.append(cleaned)
+        if not candidates:
+            full_name = payload.get("fullName") or payload.get("full_name")
+            if isinstance(full_name, str):
+                cleaned = full_name.strip()
+                if cleaned:
+                    return cleaned
+            return None
+        return " ".join(candidates)
+
+    def _assign_iiko_name_parts(self, user: User, payload: dict[str, Any]) -> None:
+        if not payload:
+            return
+        middle_name = self._extract_iiko_string(payload, "middleName", "middle_name")
+        surname = self._extract_iiko_string(payload, "surname", "lastName", "familyName")
+        if middle_name and not user.middle_name:
+            user.middle_name = middle_name
+        if surname and not user.surname:
+            user.surname = surname
+
+    def _extract_iiko_string(self, payload: dict[str, Any], *keys: str) -> str | None:
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned:
+                    return cleaned
+        return None
+
+    def _parse_iiko_birthday(self, value: Any) -> date | None:
+        if not value:
+            return None
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    return datetime.strptime(cleaned, fmt).date()
+                except ValueError:
+                    continue
+            try:
+                return datetime.fromisoformat(cleaned).date()
+            except ValueError:
+                return None
+        return None
+
+    def _map_iiko_sex(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        candidate = str(value).strip().lower()
+        if not candidate:
+            return None
+        if candidate in {"1", "male", "m", "man"}:
+            return "male"
+        if candidate in {"2", "female", "f", "woman"}:
+            return "female"
+        return candidate
+
+    def _ensure_iiko_customer(self, user: User, *, name: str | None, date_of_birth: date | None) -> None:
+        payload = self._build_customer_payload(user, name=name, date_of_birth=date_of_birth)
+        response = self.iiko_service.create_or_update_customer(phone=user.phone, payload_extra=payload)
+        self._sync_user_with_iiko(user, response)
+        if not user.cards:
+            self._bind_card_to_user(user)
+
+    def _ensure_iiko_customer_safe(self, user: User, *, name: str | None, date_of_birth: date | None) -> None:
+        try:
+            self._ensure_iiko_customer(user, name=name, date_of_birth=date_of_birth)
+        except exceptions.ServiceError as exc:
+            logger.warning("Failed to ensure Iiko customer for %s: %s", user.phone, exc)
+
+    def _fetch_iiko_customer(self, phone: str) -> dict[str, Any] | None:
+        try:
+            return self.iiko_service.get_customer_by_phone(phone)
+        except exceptions.ServiceError as exc:
+            logger.warning("Unable to lookup Iiko customer %s: %s", phone, exc)
+            return None
+
+    def _build_customer_payload(self, user: User, *, name: str | None, date_of_birth: date | None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"comment": "CASHBACK MOBILE APP CLIENT"}
+        cleaned_name = self._clean_value(name or user.name)
+        if cleaned_name:
+            payload["fullName"] = cleaned_name
+            payload["name"] = cleaned_name
+        formatted_birthday = self._format_iiko_birthday_value(date_of_birth or user.date_of_birth)
+        if formatted_birthday:
+            payload["birthday"] = formatted_birthday
+        if user.email:
+            payload["email"] = user.email
+        if user.gender:
+            payload["sex"] = user.gender
+        surname = self._clean_value(user.surname)
+        if surname:
+            payload["surname"] = surname
+        middle_name = self._clean_value(user.middle_name)
+        if middle_name:
+            payload["middleName"] = middle_name
+        return payload
+
+    def _clean_value(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned if cleaned else None
+
+    def _format_iiko_birthday_value(self, value: date | None) -> str | None:
+        if value is None:
+            return None
+        return f"{value.strftime('%Y-%m-%d')}T00:00:00.000"
+
+    def _bind_card_to_user(self, user: User) -> None:
+        if not user.iiko_customer_id:
+            raise exceptions.ServiceError("Unable to attach card without iiko customer id")
+        card = self.card_service.create_card_for_user(user)
+        card_response = self.iiko_service.add_card(
+            customer_id=user.iiko_customer_id, card_number=card.card_number, card_track=card.card_track
+        )
+        iiko_card_id = card_response.get("id") or card_response.get("cardId")
+        if iiko_card_id:
+            card.iiko_card_id = iiko_card_id
+        self.db.add(card)
+        self.db.flush()
+
+    def _ensure_user_for_login(self, phone: str) -> User | None:
+        user = self._find_active_user_by_phone(phone)
+        if user:
+            return user
+        iiko_customer = self._fetch_iiko_customer(phone)
+        if not iiko_customer:
+            return None
+        user = User(phone=phone, name=iiko_customer.get("fullName"))
+        self.db.add(user)
+        self.db.flush()
+        self._sync_user_with_iiko(user, iiko_customer)
+        return user
+
+    def _find_or_create_user_from_iiko(self, phone: str) -> User | None:
+        user = self._find_active_user_by_phone(phone)
+        if user:
+            return user
+        iiko_customer = self._fetch_iiko_customer(phone)
+        if not iiko_customer:
+            return None
+        user = User(phone=phone, name=iiko_customer.get("fullName"))
+        self.db.add(user)
+        self.db.flush()
+        self._sync_user_with_iiko(user, iiko_customer)
+        return user
+
     def create_staff(
         self,
         *,
@@ -118,6 +409,7 @@ class AuthService:
         role: StaffRole,
         branch_id: int | None,
         actor: Staff,
+        referral_code: str | None = None,
     ) -> Staff:
         if actor.role != StaffRole.MANAGER:
             raise exceptions.AuthorizationError("Only managers can create staff")
@@ -131,7 +423,18 @@ class AuthService:
             branch_id=branch_id,
         )
         if role == StaffRole.WAITER:
-            staff.referral_code = self._generate_referral_code()
+            normalized_referral = referral_code.strip() if referral_code and referral_code.strip() else None
+            if normalized_referral:
+                exists = (
+                    self.db.query(func.count(Staff.id))
+                    .filter(Staff.referral_code == normalized_referral)
+                    .scalar()
+                )
+                if exists:
+                    raise exceptions.ConflictError("Waiter with this referral code already exists")
+                staff.referral_code = normalized_referral
+            else:
+                staff.referral_code = self._generate_referral_code()
 
         self.db.add(staff)
         try:
@@ -145,6 +448,7 @@ class AuthService:
 
     def staff_login(self, *, phone: str, password: str, ip: str | None, user_agent: str | None) -> tuple[Staff, dict[str, str]]:
         identifier = phone.strip()
+        self._ensure_login_rate_limit(ip=ip)
         staff = self.db.query(Staff).filter(Staff.phone == identifier).first()
         if not staff or not security.verify_password(password, staff.password_hash):
             log_auth_event(
@@ -207,6 +511,25 @@ class AuthService:
         tokens = self.issue_tokens(actor_type=AuthActorType(actor_type), subject_id=subject_id, extra=extra)
         return tokens
 
+    def _ensure_login_rate_limit(self, *, ip: str | None) -> None:
+        if not ip:
+            return
+        threshold = self.settings.LOGIN_RATE_LIMIT_PER_WINDOW
+        if not threshold:
+            return
+        window_start = datetime.now(tz=timezone.utc) - timedelta(minutes=self.settings.RATE_LIMIT_BLOCK_MINUTES)
+        recent_failures = (
+            self.db.query(func.count(AuthLog.id))
+            .filter(
+                AuthLog.ip == ip,
+                AuthLog.action == AuthAction.FAILED_LOGIN,
+                AuthLog.created_at >= window_start,
+            )
+            .scalar()
+        )
+        if recent_failures and recent_failures >= threshold:
+            raise exceptions.RateLimitExceeded(self._rate_limit_block_message())
+
     def _generate_referral_code(self) -> str:
         alphabet = string.ascii_uppercase + string.digits
         for _ in range(10):
@@ -215,3 +538,6 @@ class AuthService:
             if not exists:
                 return referral_code
         raise exceptions.ServiceError("Failed to generate unique referral code")
+
+    def _rate_limit_block_message(self) -> str:
+        return f"Ko'p so'rov jonatildi, {self.settings.RATE_LIMIT_BLOCK_MINUTES} daqiqadan keyin yana urinib ko'ring."
