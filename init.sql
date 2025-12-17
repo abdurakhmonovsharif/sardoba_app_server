@@ -66,6 +66,8 @@ CREATE INDEX IF NOT EXISTS idx_staff_referral_code ON staff(referral_code);
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NULL,
+    surname VARCHAR(100) NULL,
+    middle_name VARCHAR(100) NULL,
     phone VARCHAR(20) UNIQUE NOT NULL,
     waiter_id INTEGER NULL REFERENCES staff(id),
     date_of_birth DATE NULL,
@@ -73,6 +75,7 @@ CREATE TABLE IF NOT EXISTS users (
     level user_level NOT NULL DEFAULT 'SILVER',
     iiko_wallet_id VARCHAR(64) UNIQUE NULL,
     iiko_customer_id VARCHAR(64) UNIQUE NULL,
+    pending_iiko_profile_update JSONB NULL,
     email VARCHAR(320) UNIQUE NULL,
     gender VARCHAR(16) NULL,
     is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
@@ -83,6 +86,9 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);
 CREATE INDEX IF NOT EXISTS idx_users_waiter_id ON users(waiter_id);
+ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS surname VARCHAR(100) NULL;
+ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS middle_name VARCHAR(100) NULL;
+ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS pending_iiko_profile_update JSONB NULL;
 
 CREATE TABLE IF NOT EXISTS deleted_phones (
     id SERIAL PRIMARY KEY,
@@ -126,10 +132,12 @@ CREATE TABLE IF NOT EXISTS cashback_transactions (
     source cashback_source NOT NULL,
     balance_after NUMERIC(12, 2) NOT NULL,
     iiko_event_id VARCHAR(128) UNIQUE NULL,
+    iiko_uoc_id VARCHAR(128) NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_cashback_transactions_user_id ON cashback_transactions(user_id);
+ALTER TABLE IF EXISTS cashback_transactions ADD COLUMN IF NOT EXISTS iiko_uoc_id VARCHAR(128) NULL;
 
 -- OTP codes table
 CREATE TABLE IF NOT EXISTS otp_codes (
