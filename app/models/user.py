@@ -38,7 +38,7 @@ class User(TimestampMixin, Base):
     surname: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     middle_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     phone: Mapped[str] = mapped_column(String(20), unique=True, index=True)
-    waiter_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff.id"), nullable=False)
+    waiter_id: Mapped[Optional[int]] = mapped_column(ForeignKey("staff.id"), nullable=True)
     date_of_birth: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     profile_photo_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     level: Mapped[UserLevel] = mapped_column(

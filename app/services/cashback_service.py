@@ -1,8 +1,8 @@
 import logging
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 
-from sqlalchemy import func, or_
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 from app.models import (
     CashbackBalance,
@@ -11,35 +11,13 @@ from app.models import (
     Staff,
     StaffRole,
     User,
-    UserLevel,
 )
 
 from . import exceptions
 from .push_notification_service import PushNotificationService
 
-TWOPLACES = Decimal("0.01")
-
 
 class CashbackService:
-    LEVEL_REWARD_SETTINGS = {
-        UserLevel.SILVER: {
-            "cashback_percent": Decimal("0.02"),
-            "points_divisor": Decimal("2"),
-        },
-        UserLevel.GOLD: {
-            "cashback_percent": Decimal("0.025"),
-            "points_divisor": Decimal("3"),
-        },
-        UserLevel.PREMIUM: {
-            "cashback_percent": Decimal("0.03"),
-            "points_divisor": Decimal("5"),
-        },
-        UserLevel.VIP: {
-            "cashback_percent": Decimal("0.035"),
-            "points_divisor": Decimal("8"),
-        },
-    }
-
     def __init__(self, db: Session):
         self.db = db
         self._min_cashback_use = Decimal("50000")
@@ -104,16 +82,8 @@ class CashbackService:
             new_balance = current_balance + amount
         balance.balance = new_balance
 
-        points_before = balance.points or zero
-        earned_points = zero
-        if earn_points and amount > zero:
-            divisor = self._settings_for_level(user.level)["points_divisor"]
-            if divisor > zero:
-                earned_points = (amount / divisor).to_integral_value(
-                    rounding=ROUND_DOWN
-                )
-        balance.points = points_before + earned_points
-        level_changed = user.apply_level_from_points(balance.points)
+        # Loyalty levels and point accrual are temporarily disabled.
+        balance.points = balance.points or zero
         cashback = CashbackTransaction(
             user_id=user.id,
             staff_id=staff_id,
@@ -126,8 +96,6 @@ class CashbackService:
         )
         print("cashback = ", cashback.__dict__)
         self.db.add(cashback)
-        if level_changed:
-            self.db.add(user)
         self.db.flush()
         self.db.commit()
         self.db.refresh(cashback)
@@ -150,38 +118,8 @@ class CashbackService:
         return query.all()
 
     def loyalty_summary(self, *, user: User) -> dict:
-        metrics = user.loyalty_metrics()
-        level = metrics["level"]
-        next_level = metrics["next_level"]
-        points_total = metrics["points"]
-        current_floor = metrics["current_level_floor"]
-        current_progress = metrics["progress_in_level"]
-        next_level_threshold = metrics["next_level_threshold"]
-        points_to_next = Decimal("0")
-        if next_level_threshold is not None:
-            delta = next_level_threshold - points_total
-            points_to_next = delta if delta >= Decimal("0") else Decimal("0")
-        current_percent = self._settings_for_level(level)["cashback_percent"]
-        next_level_percent = (
-            self._settings_for_level(next_level)["cashback_percent"]
-            if next_level
-            else None
-        )
         return {
-            "level": level.value if level else None,
-            "cashback_balance": metrics["balance"],
-            "points_total": points_total,
-            "current_level_points": current_progress,
-            "current_level_min_points": current_floor,
-            "current_level_max_points": next_level_threshold,
-            "next_level": next_level.value if next_level else None,
-            "next_level_required_points": next_level_threshold,
-            "points_to_next_level": (
-                Decimal("0") if next_level is None else points_to_next
-            ),
-            "is_max_level": next_level is None,
-            "cashback_percent": self._percent_value(current_percent),
-            "next_level_cashback_percent": self._percent_value(next_level_percent),
+            "cashback_balance": user.cashback_balance,
         }
 
     def check_cashback_payment(self, *, user_id: int, amount: Decimal) -> Decimal:
@@ -232,29 +170,6 @@ class CashbackService:
         )
         return [dict(row._mapping) for row in rows]
 
-    @staticmethod
-    def _decimal_to_str(value: Decimal | None) -> str | None:
-        if value is None:
-            return None
-        return format(value.quantize(TWOPLACES), "f")
-
-    def _percent_to_str(self, value: Decimal | None) -> str | None:
-        if value is None:
-            return None
-        return self._decimal_to_str(value * Decimal("100"))
-
-    def _settings_for_level(self, level: UserLevel | None) -> dict[str, Decimal]:
-        if level is None:
-            return {"points_divisor": Decimal("2")}
-        return self.LEVEL_REWARD_SETTINGS.get(
-            level, self.LEVEL_REWARD_SETTINGS[UserLevel.SILVER]
-        )
-
-    def _percent_value(self, value: Decimal | None) -> Decimal | None:
-        if value is None:
-            return None
-        return (value * Decimal("100")).quantize(TWOPLACES)
-
     def top_users(self, limit: int = 10) -> list[dict]:
         rows = (
             self.db.query(
@@ -280,13 +195,12 @@ class CashbackService:
                 User.name.label("user_name"),
                 User.phone,
                 User.waiter_id,
-                User.level,
                 func.coalesce(func.sum(CashbackTransaction.amount), 0).label("total_cashback"),
                 func.count(CashbackTransaction.id).label("transactions"),
             )
             .outerjoin(CashbackTransaction, CashbackTransaction.user_id == User.id)
             .filter(User.is_deleted == False)  # noqa: E712
-            .group_by(User.id, User.name, User.phone, User.waiter_id, User.level)
+            .group_by(User.id, User.name, User.phone, User.waiter_id)
             .order_by(func.coalesce(func.sum(CashbackTransaction.amount), 0).desc())
             .limit(limit)
             .all()
@@ -301,7 +215,6 @@ class CashbackService:
                         "name": data["user_name"],
                         "phone": data["phone"],
                         "waiter_id": data["waiter_id"],
-                        "level": data["level"].value if data["level"] else None,
                         "cashback_balance": None,
                     },
                     "total_cashback": data["total_cashback"],
@@ -311,94 +224,28 @@ class CashbackService:
         return leaderboard
 
     def loyalty_analytics_summary(self, near_limit: int = 5) -> dict:
-        tier_counts = {level: 0 for level in UserLevel}
-        rows = (
-            self.db.query(User.level, func.count(User.id))
+        total_users = (
+            self.db.query(func.count(User.id))
             .filter(User.is_deleted == False)  # noqa: E712
-            .group_by(User.level)
-            .all()
+            .scalar()
+            or 0
         )
-        for level, count in rows:
-            tier_counts[level] = count
-
-        average_points = (
-            self.db.query(func.coalesce(func.avg(CashbackBalance.points), 0))
+        total_balance = (
+            self.db.query(func.coalesce(func.sum(CashbackBalance.balance), 0))
             .scalar()
             or Decimal("0")
         )
-
-        users = (
-            self.db.query(User)
-            .options(selectinload(User.cashback_wallet))
-            .filter(User.is_deleted == False)  # noqa: E712
-            .all()
+        users_with_balance = (
+            self.db.query(func.count(CashbackBalance.user_id))
+            .scalar()
+            or 0
+        )
+        avg_balance = (
+            total_balance / users_with_balance if users_with_balance else Decimal("0")
         )
 
-        near_next: list[dict] = []
-        for user in users:
-            metrics = user.loyalty_metrics()
-            next_level = metrics.get("next_level")
-            missing = metrics.get("points_to_next")
-            if next_level is None or missing is None:
-                continue
-            missing_normalized = self._normalize_points(missing)
-            if missing_normalized <= Decimal("0"):
-                continue
-            near_next.append(
-                {
-                    "user": self._serialize_loyalty_user(user, metrics),
-                    "missingPoints": float(missing_normalized),
-                }
-            )
-
-        near_next.sort(key=lambda item: item["missingPoints"])
-        near_next = near_next[:near_limit]
-
-        tier_counts_payload = [
-            {
-                "tier": level.value.title(),
-                "users": int(tier_counts.get(level, 0)),
-            }
-            for level in UserLevel
-        ]
-
         return {
-            "tierCounts": tier_counts_payload,
-            "nearNextTier": near_next,
-            "averagePoints": float(average_points),
-        }
-
-    @staticmethod
-    def _normalize_points(value: Decimal | None) -> Decimal:
-        if value is None:
-            return Decimal("0")
-        if isinstance(value, Decimal):
-            return value
-        return Decimal(str(value))
-
-    def _serialize_loyalty_user(self, user: User, metrics: dict) -> dict:
-        name = user.name or ""
-        first_name = name.split(" ", 1)[0] if name else ""
-        last_name = name.split(" ", 1)[1] if name and " " in name else ""
-        next_level = metrics.get("next_level")
-        next_level_threshold = metrics.get("next_level_threshold")
-        return {
-            "id": user.id,
-            "name": name or None,
-            "first_name": first_name or None,
-            "last_name": last_name or None,
-            "phone": user.phone,
-            "cashback_balance": float(metrics.get("balance") or 0),
-            "level": metrics.get("level").value if metrics.get("level") else None,
-            "loyalty": {
-                "current_points": float(metrics.get("points") or 0),
-                "current_level": metrics.get("level").value if metrics.get("level") else None,
-                "next_level": next_level.value if next_level else None,
-                "next_level_threshold": float(next_level_threshold)
-                if next_level_threshold is not None
-                else None,
-                "progress_percent": None,
-            },
-            "is_active": not bool(getattr(user, "is_deleted", False)),
-            "created_at": getattr(user, "created_at", None),
+            "totalUsers": int(total_users),
+            "totalCashbackBalance": float(total_balance),
+            "averageCashbackBalance": float(avg_balance),
         }

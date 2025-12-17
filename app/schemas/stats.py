@@ -27,7 +27,6 @@ class LeaderboardUser(BaseModel):
     name: str | None
     phone: str
     waiter_id: int | None
-    level: str | None
     cashback_balance: Decimal | None = None
 
 

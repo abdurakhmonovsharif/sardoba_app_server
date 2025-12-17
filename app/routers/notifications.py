@@ -178,7 +178,8 @@ async def notifications_ws(websocket: WebSocket) -> None:
     except Exception:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-    if payload.get("actor_type") != AuthActorType.CLIENT.value:
+    actor_type = payload.get("actor_type") or payload.get("type")
+    if actor_type != AuthActorType.CLIENT.value:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     user_id = int(payload["sub"])

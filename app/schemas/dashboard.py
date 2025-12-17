@@ -4,18 +4,11 @@ from typing import Literal
 from pydantic import BaseModel
 
 
-class LoyaltySlice(BaseModel):
-    label: str
-    value: int
-    color: str
-
-
 class DashboardMetrics(BaseModel):
     totalClients: int
     activeWaiters: int
     cashbackIssued: float
     avgCashbackPerUser: float
-    loyaltyDistribution: list[LoyaltySlice]
     newsCount: int
     redisHealthy: bool
     postgresHealthy: bool

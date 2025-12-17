@@ -16,15 +16,7 @@ from app.models import (
     Staff,
     StaffRole,
     User,
-    UserLevel,
 )
-
-LOYALTY_COLORS = {
-    UserLevel.SILVER: "#2563eb",
-    UserLevel.GOLD: "#38bdf8",
-    UserLevel.PREMIUM: "#f97316",
-    UserLevel.VIP: "#22c55e",
-}
 
 
 class DashboardService:
@@ -62,7 +54,6 @@ class DashboardService:
             "activeWaiters": int(active_waiters),
             "cashbackIssued": cashback_total,
             "avgCashbackPerUser": float(avg_cashback),
-            "loyaltyDistribution": self._loyalty_distribution(),
             "newsCount": self._active_news_count(),
             "redisHealthy": redis_ok,
             "postgresHealthy": postgres_ok,
@@ -131,28 +122,6 @@ class DashboardService:
                 "message": "Uses Redis-backed queues" if queue_ok else "Queue unavailable",
             },
         ]
-
-    def _loyalty_distribution(self) -> list[dict]:
-        counts: dict[UserLevel, int] = {level: 0 for level in UserLevel}
-        rows = (
-            self.db.query(User.level, func.count(User.id))
-            .filter(User.is_deleted == False)  # noqa: E712
-            .group_by(User.level)
-            .all()
-        )
-        for level, count in rows:
-            counts[level] = count
-
-        slices: list[dict] = []
-        for level in UserLevel:
-            slices.append(
-                {
-                    "label": level.value.title(),
-                    "value": int(counts.get(level, 0)),
-                    "color": LOYALTY_COLORS.get(level, "#2563eb"),
-                }
-            )
-        return slices
 
     def _active_news_count(self) -> int:
         now = datetime.now(tz=timezone.utc)

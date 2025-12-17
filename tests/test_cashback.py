@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from app.core.security import create_password_hash
 from app.models import Staff, StaffRole, User
-from app.models.enums import SardobaBranch, UserLevel
+from app.models.enums import SardobaBranch
 
 
 def _create_manager(session, phone="+998900000002"):
@@ -64,18 +64,8 @@ def test_add_cashback_and_history(client, session_factory):
     assert Decimal(str(transactions[0]["balance_after"])) == Decimal("15.50")
     assert transactions[0]["branch_id"] == SardobaBranch.SARDOBA_GEOFIZIKA.value
     loyalty = history["loyalty"]
-    assert loyalty["level"] == "SILVER"
     assert Decimal(str(loyalty["cashback_balance"])) == Decimal("15.50")
-    assert Decimal(str(loyalty["points_total"])) == Decimal("7")
-    assert Decimal(str(loyalty["current_level_points"])) == Decimal("7")
-    assert Decimal(str(loyalty["current_level_min_points"])) == Decimal("0")
-    assert Decimal(str(loyalty["current_level_max_points"])) == Decimal("10000")
-    assert loyalty["next_level"] == "GOLD"
-    assert Decimal(str(loyalty["next_level_required_points"])) == Decimal("10000")
-    assert Decimal(str(loyalty["points_to_next_level"])) == Decimal("9993")
-    assert loyalty["is_max_level"] is False
-    assert Decimal(str(loyalty["cashback_percent"])) == Decimal("2.00")
-    assert Decimal(str(loyalty["next_level_cashback_percent"])) == Decimal("2.50")
+    assert set(loyalty.keys()) == {"cashback_balance"}
 
     session = session_factory()
     user_db = session.query(User).filter(User.id == user.id).one()
@@ -83,7 +73,7 @@ def test_add_cashback_and_history(client, session_factory):
     session.close()
 
 
-def test_add_cashback_awards_loyalty_points(client, session_factory):
+def test_add_cashback_does_not_award_points(client, session_factory):
     session = session_factory()
     manager = _create_manager(session, phone="+998900000003")
     user = _create_user(session, phone="+998901234569")
@@ -109,8 +99,7 @@ def test_add_cashback_awards_loyalty_points(client, session_factory):
     session = session_factory()
     user_db = session.query(User).filter(User.id == user.id).one()
     assert user_db.cashback_wallet is not None
-    assert Decimal(user_db.cashback_wallet.points) == Decimal("125000")
-    assert user_db.level == UserLevel.VIP
+    assert Decimal(user_db.cashback_wallet.points) == Decimal("0")
     session.close()
 
 

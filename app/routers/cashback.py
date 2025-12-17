@@ -100,7 +100,7 @@ def loyalty_analytics(
     manager: Staff = Depends(get_current_manager),
     db: Session = Depends(get_db),
 ):
-    """Return aggregated loyalty analytics for dashboards."""
+    """Return aggregated cashback analytics (levels disabled temporarily)."""
     service = CashbackService(db)
     return service.loyalty_analytics_summary()
 

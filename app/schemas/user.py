@@ -19,7 +19,6 @@ class UserRead(BaseModel):
     date_of_birth: Optional[str]
     profile_photo_url: Optional[str]
     cashback_balance: Decimal
-    level: str
     email: Optional[str]
     gender: Optional[str]
     surname: Optional[str]
@@ -39,15 +38,6 @@ class UserRead(BaseModel):
         if isinstance(value, str):
             return value
         return value.strftime("%d.%m.%Y")
-
-    @validator("level", pre=True)
-    def format_level(cls, value: Optional[str]):
-        if value is None:
-            return "Silver"
-        raw = value.value if hasattr(value, "value") else value
-        if isinstance(raw, str):
-            return raw.capitalize()
-        return str(raw)
 
 
 class UserUpdate(BaseModel):

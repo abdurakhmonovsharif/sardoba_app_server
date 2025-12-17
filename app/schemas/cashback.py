@@ -1,6 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -40,22 +40,7 @@ class CashbackUseResponse(BaseModel):
 
 
 class LoyaltySummary(BaseModel):
-    level: Optional[str]
     cashback_balance: Decimal
-
-    points_total: Decimal
-    current_level_points: Decimal
-    current_level_min_points: Decimal
-    current_level_max_points: Optional[Decimal]
-
-    next_level: Optional[str]
-    next_level_required_points: Optional[Decimal]
-    points_to_next_level: Decimal
-
-    is_max_level: bool
-
-    cashback_percent: Decimal
-    next_level_cashback_percent: Optional[Decimal]
 
 
 class CashbackHistoryResponse(BaseModel):
@@ -63,17 +48,7 @@ class CashbackHistoryResponse(BaseModel):
     transactions: list[CashbackRead]
 
 
-class TierCount(BaseModel):
-    tier: str
-    users: int
-
-
-class NearNextTier(BaseModel):
-    user: dict[str, Any]
-    missingPoints: float
-
-
 class LoyaltyAnalytics(BaseModel):
-    tierCounts: list[TierCount]
-    nearNextTier: list[NearNextTier]
-    averagePoints: float
+    totalUsers: int
+    totalCashbackBalance: float
+    averageCashbackBalance: float

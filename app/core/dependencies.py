@@ -44,7 +44,8 @@ def get_current_client(db: Session = Depends(get_db), token: str = Depends(_get_
             status_code=status.HTTP_401_UNAUTHORIZED, detail=localize_message("Invalid token")
         ) from exc
 
-    if payload.get("actor_type") != AuthActorType.CLIENT.value:
+    actor_type = payload.get("actor_type") or payload.get("type")
+    if actor_type != AuthActorType.CLIENT.value:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=localize_message("Insufficient permissions")
         )
@@ -64,7 +65,8 @@ def get_current_staff(db: Session = Depends(get_db), token: str = Depends(_get_t
             status_code=status.HTTP_401_UNAUTHORIZED, detail=localize_message("Invalid token")
         ) from exc
 
-    if payload.get("actor_type") != AuthActorType.STAFF.value:
+    actor_type = payload.get("actor_type") or payload.get("type")
+    if actor_type != AuthActorType.STAFF.value:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=localize_message("Insufficient permissions")
         )
