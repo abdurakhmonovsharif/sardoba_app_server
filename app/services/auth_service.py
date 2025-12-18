@@ -501,6 +501,9 @@ class AuthService:
             raise exceptions.AuthenticationError("Invalid token actor type")
 
         subject_id = int(payload["sub"])
+        if payload.get("mock_user"):
+            extra = {k: v for k, v in payload.items() if k not in {"sub", "exp", "scope", "type", "actor_type"}}
+            return self.issue_tokens(actor_type=AuthActorType(actor_type), subject_id=subject_id, extra=extra)
         if actor_type == AuthActorType.CLIENT.value:
             if not self.db.query(User.id).filter(User.id == subject_id).first():
                 raise exceptions.AuthenticationError("User not found")

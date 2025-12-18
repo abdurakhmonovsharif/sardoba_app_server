@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, status
 from sqlalchemy.orm import Session
 
@@ -27,6 +30,20 @@ from app.services import AuthService, CashbackService, StaffService
 from app.services import exceptions as service_exceptions
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+_FALLBACK_DEMO_PHONE = "+998911111111"
+
+
+def _normalize_phone(phone: str) -> str:
+    return (phone or "").strip().replace(" ", "")
+
+
+def _resolve_demo_phone(demo_phone: str | None, environment: str) -> str | None:
+    if demo_phone:
+        return demo_phone
+    if (environment or "").lower() == "production":
+        return None
+    return _FALLBACK_DEMO_PHONE
 
 
 @router.post("/client/request-otp", status_code=status.HTTP_204_NO_CONTENT)
@@ -62,8 +79,18 @@ def verify_client_otp(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict:
-    print("verify_client_otp payload:", payload.dict(exclude_none=True))
     service = AuthService(db)
+    demo_phone = _resolve_demo_phone(service.settings.DEMO_PHONE, service.settings.ENVIRONMENT)
+    if demo_phone and _normalize_phone(payload.phone) == _normalize_phone(demo_phone) and payload.code == (
+        service.settings.OTP_DEMO_CODE or "1111"
+    ):
+        tokens = service.issue_tokens(
+            actor_type=AuthActorType.CLIENT,
+            subject_id=0,
+            extra={"mock_user": True, "phone": payload.phone},
+        )
+        token_payload = TokenResponse(access_token=tokens["access"], refresh_token=tokens["refresh"])
+        return {"tokens": token_payload}
     try:
         user, tokens = service.verify_client_otp(
             phone=payload.phone,
@@ -81,7 +108,6 @@ def verify_client_otp(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=localize_message(str(exc))) from exc
 
     token_payload = TokenResponse(access_token=tokens["access"], refresh_token=tokens["refresh"])
-    print("verify_client_otp response:", token_payload.dict())
     return {"tokens": token_payload}
 
 
@@ -191,7 +217,37 @@ def read_profile(
     db: Session = Depends(get_db),
     cashback_limit: int = 10,
 ):
-    actor_type = payload.get("actor_type")
+    actor_type = payload.get("actor_type") or payload.get("type")
+    if actor_type == AuthActorType.CLIENT.value and payload.get("mock_user"):
+        now = datetime.now(tz=timezone.utc)
+        phone = payload.get("phone") or _FALLBACK_DEMO_PHONE
+        balance = Decimal("0.00")
+        return {
+            "type": AuthActorType.CLIENT.value,
+            "profile": {
+                "id": 0,
+                "name": "Test User",
+                "phone": phone,
+                "waiter_id": None,
+                "date_of_birth": None,
+                "profile_photo_url": None,
+                "cashback_balance": balance,
+                "email": None,
+                "gender": None,
+                "surname": None,
+                "middleName": None,
+                "is_deleted": False,
+                "created_at": now,
+                "updated_at": now,
+            },
+            "cashback": {
+                "balance": balance,
+                "transactions": [],
+                "cards": [],
+                "currency": "UZS",
+                "loyalty": {"cashback_balance": balance},
+            },
+        }
     subject_raw = payload.get("sub")
     if subject_raw is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=localize_message("Invalid token"))
