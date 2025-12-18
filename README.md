@@ -147,7 +147,7 @@ Base prefix is `API_V1_PREFIX` (default: `/api/v1`).
 pytest
 ```
 
-If you see `Client.__init__() got an unexpected keyword argument 'app'`, your `httpx`/`starlette` versions are incompatible (Starlette `0.36.x` requires `httpx<0.28` for `TestClient`).
+This repo pins `httpx==0.28.x` (required by `eskiz-sms`). Starlette `0.36.x` `TestClient` is not compatible with `httpx>=0.28`, so tests use `httpx.ASGITransport` instead of `fastapi.testclient.TestClient`.
 
 ## Folder Structure
 

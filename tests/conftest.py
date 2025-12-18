@@ -3,7 +3,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+import anyio
+import httpx
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -21,6 +22,9 @@ os.environ.setdefault("OTP_RATE_LIMIT_PER_HOUR", "10")
 os.environ.setdefault("ESKIZ_LOGIN", "test@example.com")
 os.environ.setdefault("ESKIZ_PASSWORD", "test-password")
 os.environ.setdefault("SMS_DRY_RUN", "true")
+os.environ.setdefault("IIKO_API_BASE_URL", "http://127.0.0.1:1")
+os.environ.setdefault("IIKO_API_LOGIN", "test-iiko-login")
+os.environ.setdefault("IIKO_ORGANIZATION_ID", "test-org")
 
 from app.core.config import get_settings
 from app.core import db as db_module
@@ -84,7 +88,47 @@ def client(session_factory):
 
     app.dependency_overrides[get_db] = _get_test_db
 
-    with TestClient(app) as test_client:
+    class _SyncASGIClient:
+        def __init__(self, fastapi_app):
+            self._client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=fastapi_app),
+                base_url="http://testserver",
+            )
+
+        def request(self, method: str, url: str, **kwargs):
+            async def _do_request():
+                return await self._client.request(method, url, **kwargs)
+
+            return anyio.run(_do_request)
+
+        def get(self, url: str, **kwargs):
+            return self.request("GET", url, **kwargs)
+
+        def post(self, url: str, **kwargs):
+            return self.request("POST", url, **kwargs)
+
+        def put(self, url: str, **kwargs):
+            return self.request("PUT", url, **kwargs)
+
+        def patch(self, url: str, **kwargs):
+            return self.request("PATCH", url, **kwargs)
+
+        def delete(self, url: str, **kwargs):
+            return self.request("DELETE", url, **kwargs)
+
+        def close(self):
+            async def _do_close():
+                await self._client.aclose()
+
+            anyio.run(_do_close)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.close()
+
+    with _SyncASGIClient(app) as test_client:
         yield test_client
 
     app.dependency_overrides.clear()

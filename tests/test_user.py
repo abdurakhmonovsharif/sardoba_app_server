@@ -51,7 +51,11 @@ def test_user_can_delete_account(client, db_session):
     )
     assert response.status_code == 204
     db_session.expire_all()
-    assert db_session.query(User).filter(User.id == user_id).first() is None
+    deleted = db_session.query(User).filter(User.id == user_id).first()
+    assert deleted is not None
+    assert deleted.is_deleted is True
+    assert deleted.deleted_at is not None
+    assert deleted.phone.startswith("+999")
 
 
 def test_user_can_upload_profile_photo(client, db_session):
