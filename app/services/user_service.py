@@ -38,7 +38,6 @@ class UserService:
         payload = {
             "isDeleted": True,
             "name": user.name or "",
-            "email": user.email or "",
             "phone": fake_phone,
             "comment": user.phone,
             "id": user.iiko_customer_id,
