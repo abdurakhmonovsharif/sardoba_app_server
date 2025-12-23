@@ -51,6 +51,29 @@ class UserNotificationService:
         self.db.add(notification)
         self.db.commit()
 
+    def mark_as_read(self, notification_id: int, user_id: int) -> UserNotification | None:
+        notification = (
+            self.db.query(UserNotification)
+            .filter(UserNotification.id == notification_id, UserNotification.user_id == user_id)
+            .first()
+        )
+        if not notification:
+            return None
+        if notification.is_read:
+            return notification
+        notification.is_read = True
+        self.db.add(notification)
+        self.db.commit()
+        self.db.refresh(notification)
+        return notification
+
+    def count_unread(self, user_id: int) -> int:
+        return (
+            self.db.query(UserNotification)
+            .filter(UserNotification.user_id == user_id, UserNotification.is_read.is_(False))
+            .count()
+        )
+
     def create_notification(
         self,
         *,

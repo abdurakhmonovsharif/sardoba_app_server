@@ -43,6 +43,7 @@ from .notification import (
     AdminNotificationCreate,
     NotificationListResponse,
     UserNotificationRead,
+    UserNotificationListResponse,
 )
 from .stats import (
     TopUserStats,
@@ -98,6 +99,7 @@ __all__ = [
     "AdminNotificationCreate",
     "NotificationListResponse",
     "UserNotificationRead",
+    "UserNotificationListResponse",
     "TopUserStats",
     "WaiterStats",
     "WaiterLeaderboardRow",

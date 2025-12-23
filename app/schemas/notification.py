@@ -69,3 +69,8 @@ class AdminNotificationCreate(BaseModel):
 class NotificationListResponse(BaseModel):
     pagination: Pagination
     items: list[NotificationRead]
+
+
+class UserNotificationListResponse(BaseModel):
+    unread_count: int
+    items: list[UserNotificationRead]

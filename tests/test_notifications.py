@@ -1,5 +1,5 @@
-from app.models import User
-from app.services import NotificationTokenService, UserNotificationService
+from app.models import AuthActorType, User
+from app.services import AuthService, NotificationTokenService, UserNotificationService
 
 
 def _create_user(session, phone="+998901234599"):
@@ -91,3 +91,59 @@ def test_user_notifications_pending_and_mark_sent(session_factory):
     pending_after = service.list_pending_for_user(user.id)
     assert not any(item.id == notification.id for item in pending_after)
     session.close()
+
+
+def test_notifications_clients_lists_global_notifications(client, db_session):
+    user = _create_user(db_session, phone="+998901234594")
+    notification = UserNotificationService(db_session).create_notification(
+        user_id=user.id,
+        title="Hello user",
+        description="World",
+        notification_type="test",
+    )
+
+    tokens = AuthService(db_session).issue_tokens(
+        actor_type=AuthActorType.CLIENT,
+        subject_id=user.id,
+    )
+
+    response = client.get(
+        "/api/v1/notifications/clients",
+        headers={"Authorization": f"Bearer {tokens['access']}"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["items"]
+    assert payload["unread_count"] == 1
+    assert payload["items"][0]["title"] == notification.title
+
+
+def test_mark_notification_read(client, db_session):
+    user = _create_user(db_session, phone="+998901234595")
+    service = UserNotificationService(db_session)
+    notification = service.create_notification(
+        user_id=user.id,
+        title="Mark me",
+        description="Read me",
+        notification_type="test",
+    )
+
+    tokens = AuthService(db_session).issue_tokens(
+        actor_type=AuthActorType.CLIENT,
+        subject_id=user.id,
+    )
+
+    read_resp = client.post(
+        f"/api/v1/notifications/clients/{notification.id}/read",
+        headers={"Authorization": f"Bearer {tokens['access']}"},
+    )
+    assert read_resp.status_code == 204
+
+    list_resp = client.get(
+        "/api/v1/notifications/clients",
+        headers={"Authorization": f"Bearer {tokens['access']}"},
+    )
+    assert list_resp.status_code == 200
+    data = list_resp.json()
+    assert data["unread_count"] == 0
+    assert data["items"][0]["is_read"] is True

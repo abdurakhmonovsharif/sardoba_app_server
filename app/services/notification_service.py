@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 
-from app.models import Notification, Staff, StaffRole
+from app.models import Notification, Staff, StaffRole, User, UserNotification
 
 from . import exceptions
 
@@ -21,6 +21,7 @@ class NotificationService:
         self.db.add(notification)
         self.db.commit()
         self.db.refresh(notification)
+        self._fan_out_to_clients(notification)
         return notification
 
     def get_notification(self, notification_id: int) -> Notification:
@@ -49,3 +50,26 @@ class NotificationService:
     def _ensure_manager(actor: Staff) -> None:
         if actor.role != StaffRole.MANAGER:
             raise exceptions.AuthorizationError("Only managers can perform this action")
+
+    def _fan_out_to_clients(self, notification: Notification) -> None:
+        """Create per-user notifications for all active users so clients can see them."""
+        user_ids = [row[0] for row in self.db.query(User.id).filter(User.is_deleted == False).all()]  # noqa: E712
+        if not user_ids:
+            return
+        records = [
+            UserNotification(
+                user_id=user_id,
+                title=notification.title,
+                description=notification.description,
+                type=None,
+                payload=None,
+                language="ru",
+            )
+            for user_id in user_ids
+        ]
+        try:
+            self.db.bulk_save_objects(records)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            # do not raise; broadcast fan-out is best-effort

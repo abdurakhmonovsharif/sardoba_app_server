@@ -15,6 +15,7 @@ from app.schemas import (
     NotificationTokenRegister,
     NotificationUpdate,
     UserNotificationRead,
+    UserNotificationListResponse,
 )
 from app.services import (
     NotificationService,
@@ -75,7 +76,7 @@ def create_notification(
     return NotificationRead.from_orm(notification)
 
 
-@router.get("/{notification_id}", response_model=NotificationRead)
+@router.get("/{notification_id:int}", response_model=NotificationRead)
 def get_notification(
     notification_id: int,
     manager: Staff = Depends(get_current_manager),
@@ -89,8 +90,8 @@ def get_notification(
     return NotificationRead.from_orm(notification)
 
 
-@router.put("/{notification_id}", response_model=NotificationRead)
-@router.patch("/{notification_id}", response_model=NotificationRead)
+@router.put("/{notification_id:int}", response_model=NotificationRead)
+@router.patch("/{notification_id:int}", response_model=NotificationRead)
 def update_notification(
     notification_id: int,
     payload: NotificationUpdate,
@@ -110,7 +111,7 @@ def update_notification(
     return NotificationRead.from_orm(notification)
 
 
-@router.delete("/{notification_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{notification_id:int}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_notification(
     notification_id: int,
     manager: Staff = Depends(get_current_manager),
@@ -138,15 +139,54 @@ def register_token(
     )
 
 
-@router.get("/me", response_model=list[UserNotificationRead])
-def list_my_notifications(
+@router.get("/clients", response_model=UserNotificationListResponse)
+def list_client_notifications(
     limit: int | None = Query(default=50, ge=1, le=200),
     current_user: User = Depends(get_current_client),
     db: Session = Depends(get_db),
-) -> list[UserNotificationRead]:
+) -> UserNotificationListResponse:
+    """Return notifications for the authenticated client along with unread count.
+
+    If the user has no per-user notifications yet, fall back to broadcasting global
+    notifications into their inbox on the fly.
+    """
     service = UserNotificationService(db)
     notifications = service.list_for_user(user_id=current_user.id, limit=limit)
-    return [UserNotificationRead.from_orm(item) for item in notifications]
+    if not notifications:
+        # hydrate from global notifications so existing broadcasts become visible
+        broadcast_service = NotificationService(db)
+        _, global_items = broadcast_service.list_notifications(page=1, size=limit or 50)
+        for item in global_items:
+            service.create_notification(
+                user_id=current_user.id,
+                title=item.title,
+                description=item.description,
+                notification_type=None,
+                payload=None,
+                language="ru",
+            )
+        notifications = service.list_for_user(user_id=current_user.id, limit=limit)
+
+    unread_count = service.count_unread(user_id=current_user.id)
+    return UserNotificationListResponse(
+        unread_count=unread_count,
+        items=[UserNotificationRead.from_orm(item) for item in notifications],
+    )
+
+
+@router.post("/clients/{notification_id:int}/read", status_code=status.HTTP_204_NO_CONTENT)
+def mark_client_notification_read(
+    notification_id: int,
+    current_user: User = Depends(get_current_client),
+    db: Session = Depends(get_db),
+) -> None:
+    service = UserNotificationService(db)
+    notification = service.mark_as_read(notification_id=notification_id, user_id=current_user.id)
+    if not notification:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=localize_message("Notification not found"),
+        )
 
 
 @router.post("/send", status_code=status.HTTP_204_NO_CONTENT)
