@@ -22,6 +22,9 @@ class OTPService:
         self._rate_limit_bypass = {
             self._normalize_phone(phone) for phone in self.settings.OTP_RATE_LIMIT_BYPASS_PHONES
         }
+        self._verify_bypass = {
+            self._normalize_phone(phone) for phone in self.settings.OTP_BYPASS_VERIFY_PHONES
+        }
         self._demo_phone = (
             self._normalize_phone(self.settings.DEMO_PHONE)
             if self.settings.DEMO_PHONE
@@ -50,7 +53,8 @@ class OTPService:
         block_message = f"Ko'p so'rov jonatildi, {window_minutes} daqiqadan keyin yana urinib ko'ring."
 
         is_demo_phone = self._demo_phone is not None and normalized_phone == self._demo_phone
-        skip_rate_limit = normalized_phone in self._rate_limit_bypass or is_demo_phone
+        is_verify_bypass_phone = normalized_phone in self._verify_bypass
+        skip_rate_limit = normalized_phone in self._rate_limit_bypass or is_demo_phone or is_verify_bypass_phone
         enforce_rate_limit = not skip_rate_limit and normalized_purpose != "register"
 
         if enforce_rate_limit:
@@ -74,26 +78,44 @@ class OTPService:
         else:
             logger.debug("Rate limit bypassed for phone %s", phone)
 
-        code = self._demo_code if is_demo_phone else self._generate_code()
+        code = self._generate_code()
+        expires_at = now + timedelta(minutes=self.settings.OTP_EXPIRATION_MINUTES)
         otp = OTPCode(
             phone=phone,
             code=code,
             purpose=purpose,
-            expires_at=now + timedelta(minutes=self.settings.OTP_EXPIRATION_MINUTES),
+            expires_at=expires_at,
             ip=ip,
             user_agent=user_agent,
         )
         self.db.add(otp)
+
+        if is_demo_phone or is_verify_bypass_phone:
+            demo_otp = OTPCode(
+                phone=phone,
+                code=self._demo_code,
+                purpose=purpose,
+                expires_at=expires_at,
+                ip=ip,
+                user_agent=user_agent,
+            )
+            self.db.add(demo_otp)
+            self.sms_logger.info(
+                "Demo OTP enabled | phone=%s | real_code=%s | demo_code=%s",
+                phone,
+                code,
+                self._demo_code,
+            )
+
         self.db.flush()
 
-        if is_demo_phone:
-            self.sms_logger.info("Demo OTP generated | phone=%s | code=%s", phone, code)
-        else:
-            self._send_otp(phone=phone, code=code)
+        self._send_otp(phone=phone, code=code)
         return otp
 
     def verify_otp(self, *, phone: str, code: str, purpose: str) -> OTPCode:
         now = datetime.now(tz=timezone.utc)
+        normalized_phone = self._normalize_phone(phone)
+        bypass_demo_code = normalized_phone in self._verify_bypass and code == self._demo_code
 
         otp = (
             self.db.query(OTPCode)
@@ -106,6 +128,18 @@ class OTPService:
             .order_by(OTPCode.created_at.desc())
             .first()
         )
+        if not otp and bypass_demo_code:
+            expires_at = now + timedelta(minutes=self.settings.OTP_EXPIRATION_MINUTES)
+            otp = OTPCode(
+                phone=phone,
+                code=code,
+                purpose=purpose,
+                expires_at=expires_at,
+                ip=None,
+                user_agent=None,
+            )
+            self.db.add(otp)
+            self.db.flush()
         if not otp:
             raise exceptions.OTPInvalid("Invalid OTP code")
         expires_at = otp.expires_at

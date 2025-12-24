@@ -34,18 +34,6 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 _FALLBACK_DEMO_PHONE = "+998911111111"
 
 
-def _normalize_phone(phone: str) -> str:
-    return (phone or "").strip().replace(" ", "")
-
-
-def _resolve_demo_phone(demo_phone: str | None, environment: str) -> str | None:
-    if demo_phone:
-        return demo_phone
-    if (environment or "").lower() == "production":
-        return None
-    return _FALLBACK_DEMO_PHONE
-
-
 @router.post("/client/request-otp", status_code=status.HTTP_204_NO_CONTENT)
 def request_client_otp(
     payload: ClientOTPRequest,
@@ -80,17 +68,6 @@ def verify_client_otp(
     db: Session = Depends(get_db),
 ) -> dict:
     service = AuthService(db)
-    demo_phone = _resolve_demo_phone(service.settings.DEMO_PHONE, service.settings.ENVIRONMENT)
-    if demo_phone and _normalize_phone(payload.phone) == _normalize_phone(demo_phone) and payload.code == (
-        service.settings.OTP_DEMO_CODE or "1111"
-    ):
-        tokens = service.issue_tokens(
-            actor_type=AuthActorType.CLIENT,
-            subject_id=0,
-            extra={"mock_user": True, "phone": payload.phone},
-        )
-        token_payload = TokenResponse(access_token=tokens["access"], refresh_token=tokens["refresh"])
-        return {"tokens": token_payload}
     try:
         user, tokens = service.verify_client_otp(
             phone=payload.phone,

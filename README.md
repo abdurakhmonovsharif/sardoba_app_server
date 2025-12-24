@@ -31,7 +31,7 @@ uvicorn app.main:app --reload
 
 Run on LAN:
 ```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
 ```
 
 ## Configuration (.env)
@@ -44,7 +44,7 @@ The config is defined in `app/core/config.py`.
 - `IIKO_API_LOGIN`, `IIKO_ORGANIZATION_ID` (and optional `IIKO_API_BASE_URL`)
 - `ESKIZ_LOGIN`, `ESKIZ_PASSWORD` (even if `SMS_DRY_RUN=true`, dummy values are still required)
 
-**Common / Optional**
+**Common / Optional**uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - `ENVIRONMENT` (`development` / `production`)
 - `REDIS_URL` (if not set or Redis is unavailable, in-memory cache is used)
 - `CORS_ORIGINS` (comma-separated or `*`)

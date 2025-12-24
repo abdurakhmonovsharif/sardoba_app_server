@@ -33,7 +33,10 @@ class Settings(BaseSettings):
     OTP_RATE_LIMIT_BYPASS_PHONES: list[str] = Field(
         default_factory=lambda: ["+998931434413"], env="OTP_RATE_LIMIT_BYPASS_PHONES"
     )
-    DEMO_PHONE: Optional[str] = Field(default=None, env="DEMO_PHONE")
+    OTP_BYPASS_VERIFY_PHONES: list[str] = Field(
+        default_factory=lambda: ["+998931434413"], env="OTP_BYPASS_VERIFY_PHONES"
+    )
+    DEMO_PHONE: Optional[str] = Field(default="+998931434413", env="DEMO_PHONE")
     OTP_DEMO_CODE: str = Field(default="1111", env="OTP_DEMO_CODE")
 
     PASSWORD_HASHING_ROUNDS: int = Field(default=12, ge=4)
@@ -92,6 +95,14 @@ class Settings(BaseSettings):
 
     @validator("OTP_RATE_LIMIT_BYPASS_PHONES", pre=True)
     def parse_rate_limit_bypass_phones(cls, v: str | list[str] | None) -> list[str]:
+        if not v:
+            return []
+        if isinstance(v, str):
+            return [phone.strip() for phone in v.split(",") if phone.strip()]
+        return v
+
+    @validator("OTP_BYPASS_VERIFY_PHONES", pre=True)
+    def parse_bypass_verify_phones(cls, v: str | list[str] | None) -> list[str]:
         if not v:
             return []
         if isinstance(v, str):
