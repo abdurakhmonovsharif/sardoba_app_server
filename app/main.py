@@ -1,7 +1,8 @@
 import logging
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, status, HTTPException
 from fastapi.exceptions import RequestValidationError
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,7 +21,12 @@ def create_app() -> FastAPI:
 
     logger = logging.getLogger("app.validation")
 
-    app = FastAPI(title=settings.PROJECT_NAME)
+    app = FastAPI(
+        title=settings.PROJECT_NAME,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     # Add CORS middleware (always enabled)
     app.add_middleware(
@@ -51,6 +57,26 @@ def create_app() -> FastAPI:
 
     api_router = get_api_router()
     app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+
+    def _require_docs_secret(secret: str | None) -> None:
+        if not settings.INTERNAL_DOCS_SECRET:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        if not secret or secret != settings.INTERNAL_DOCS_SECRET:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+    @app.get("/api/sardoba/internal-docs/openapi.json", include_in_schema=False)
+    async def internal_openapi(secret: str | None = None) -> JSONResponse:
+        _require_docs_secret(secret)
+        return JSONResponse(app.openapi())
+
+    @app.get("/api/sardoba/internal-docs/", include_in_schema=False)
+    async def internal_docs(secret: str | None = None):
+        _require_docs_secret(secret)
+        openapi_url = f"/api/sardoba/internal-docs/openapi.json?secret={secret}"
+        return get_swagger_ui_html(
+            openapi_url=openapi_url,
+            title=f"{settings.PROJECT_NAME} - Internal Docs",
+        )
 
     @app.on_event("startup")
     def startup_event():

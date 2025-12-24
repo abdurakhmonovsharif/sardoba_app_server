@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     OTP_BYPASS_VERIFY_PHONES: list[str] = Field(
         default_factory=lambda: ["+998931434413"], env="OTP_BYPASS_VERIFY_PHONES"
     )
+    INTERNAL_DOCS_SECRET: Optional[str] = Field(default=None, env="INTERNAL_DOCS_SECRET")
     DEMO_PHONE: Optional[str] = Field(default="+998931434413", env="DEMO_PHONE")
     OTP_DEMO_CODE: str = Field(default="1111", env="OTP_DEMO_CODE")
 
