@@ -55,6 +55,7 @@ class User(TimestampMixin, Base):
     is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     deleted: Mapped[bool] = synonym("is_deleted")
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    giftget: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     waiter: Mapped[Optional["Staff"]] = relationship("Staff", back_populates="clients")
     cashback_wallet: Mapped[Optional["CashbackBalance"]] = relationship(

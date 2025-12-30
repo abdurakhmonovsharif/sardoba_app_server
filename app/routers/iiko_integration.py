@@ -50,7 +50,7 @@ def _determine_amount(payload: IikoWebhookPayload) -> Decimal:
 def _find_user_for_identifiers(
     db: Session, *, wallet_id: str, customer_id: str, phone: str
 ) -> User | None:
-
+    print(f"Looking for user with wallet_id={wallet_id}, customer_id={customer_id}, phone={phone}")
     return (
         db.query(User)
         .filter(
@@ -72,6 +72,7 @@ async def iiko_webhook(
     logger.info("Incoming iiko webhook body: %s", _truncate_body(body_text))
 
     try:
+        
         if not body_text:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Request body is empty")
 
@@ -132,6 +133,7 @@ async def iiko_webhook(
             uoc_id=payload.uocId,
             balance_override=balance_override,
             earn_points=earn_points,
+            push_only_notification=True,
         )
         logger.info(
             "Recorded cashback change id=%s user=%s type=%s delta=%s",

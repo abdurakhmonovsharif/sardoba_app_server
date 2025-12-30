@@ -24,6 +24,7 @@ class UserRead(BaseModel):
     surname: Optional[str]
     middle_name: Optional[str] = Field(default=None, alias="middleName")
     is_deleted: bool
+    giftget: bool
     created_at: datetime
     updated_at: datetime
 
@@ -85,6 +86,7 @@ class AdminUserUpdate(BaseModel):
     dob: Optional[date] = None
     waiter_id: Optional[int] = None
     profile_photo_url: Optional[str] = None
+    giftget: Optional[bool] = None
 
     @validator("dob", pre=True)
     def parse_dob(cls, value: Optional[str]):

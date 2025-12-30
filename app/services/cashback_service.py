@@ -59,6 +59,7 @@ class CashbackService:
         earn_points: bool = True,
         event_id: str | None = None,
         uoc_id: str | None = None,
+        push_only_notification: bool = False,
     ) -> CashbackTransaction:
 
         balance = (
@@ -100,7 +101,11 @@ class CashbackService:
         self.db.commit()
         self.db.refresh(cashback)
         try:
-            PushNotificationService(self.db).notify_cashback_change(user.id, amount)
+            PushNotificationService(self.db).notify_cashback_change(
+                user.id,
+                amount,
+                persist=not push_only_notification,
+            )
         except Exception as exc:
             self._logger.warning("Failed to send push for cashback change: %s", exc)
         return cashback

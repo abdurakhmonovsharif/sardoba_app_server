@@ -211,6 +211,9 @@ def admin_update_user(
     if payload.profile_photo_url is not None:
         user.profile_photo_url = payload.profile_photo_url or None
         updated = True
+    if payload.giftget is not None:
+        user.giftget = payload.giftget
+        updated = True
     if payload.waiter_id is not None:
         waiter = (
             db.query(Staff)

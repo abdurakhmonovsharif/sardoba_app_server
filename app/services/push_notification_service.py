@@ -60,7 +60,7 @@ class PushNotificationService:
         self.token_service = NotificationTokenService(db)
         self.notification_service = UserNotificationService(db)
 
-    def notify_cashback_change(self, user_id: int, amount: Decimal) -> None:
+    def notify_cashback_change(self, user_id: int, amount: Decimal, *, persist: bool = True) -> None:
         if amount == 0:
             return
         data_type = "cashback_accrual" if amount > 0 else "cashback_spent"
@@ -68,6 +68,16 @@ class PushNotificationService:
         language = self._preferred_language_for_user(user_id)
         title, description = build_cashback_message(language, amount_str, amount)
         payload = {"type": data_type, "amount": str(amount)}
+        if not persist:
+            self._send_push_only(
+                user_id=user_id,
+                title=title,
+                description=description,
+                payload=payload,
+                language=language,
+                data_type=data_type,
+            )
+            return
         try:
             notification = self.notification_service.create_notification(
                 user_id=user_id,
@@ -111,6 +121,26 @@ class PushNotificationService:
             if token.language:
                 return token.language
         return "ru"
+
+    def _send_push_only(
+        self,
+        *,
+        user_id: int,
+        title: str,
+        description: str,
+        payload: dict,
+        language: str,
+        data_type: str,
+    ) -> None:
+        message = {
+            "notification_id": None,
+            "title": title,
+            "description": description,
+            "payload": payload,
+            "language": language,
+            "type": data_type,
+        }
+        notification_ws_manager.schedule_send(user_id, message)
 
     def _dispatch_notification(self, notification: UserNotification, payload: dict) -> None:
         message_payload = payload or notification.payload or {}

@@ -9,6 +9,7 @@ from . import (
     health,
     iiko_integration,
     dashboard,
+    logs,
     news,
     notifications,
     stats,
@@ -34,4 +35,5 @@ def get_api_router() -> APIRouter:
     router.include_router(iiko_integration.router)
     router.include_router(waiters.router)
     router.include_router(user_delete.router)
+    router.include_router(logs.router)
     return router

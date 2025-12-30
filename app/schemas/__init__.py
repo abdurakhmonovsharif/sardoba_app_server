@@ -33,7 +33,7 @@ from .catalog import (
     ProductRead,
     ProductUpdate,
 )
-from .common import AuthLogRead, Pagination, TokenResponse
+from .common import AuthLogRead, AuthLogActor, AuthLogListResponse, Pagination, TokenResponse
 from .news import NewsCreate, NewsRead, NewsUpdate
 from .notification import (
     NotificationCreate,
@@ -86,7 +86,9 @@ __all__ = [
     "ProductCreate",
     "ProductRead",
     "ProductUpdate",
+    "AuthLogActor",
     "AuthLogRead",
+    "AuthLogListResponse",
     "Pagination",
     "TokenResponse",
     "NewsCreate",
