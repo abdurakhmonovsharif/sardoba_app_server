@@ -130,19 +130,20 @@ class NewsRead(NewsBase):
 
     @root_validator(pre=True)
     def _populate_public_links(cls, values: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(values)
         settings = get_settings()
         base_url = settings.PUBLIC_API_URL
-        values["image_url"] = _absolute_public_url(base_url, values.get("image_url"))
+        payload["image_url"] = _absolute_public_url(base_url, payload.get("image_url"))
 
         prefix = settings.API_V1_PREFIX.strip("/")
         prefix_path = f"/{prefix}" if prefix else ""
-        news_id = values.get("id")
+        news_id = payload.get("id")
         if news_id is not None:
             news_path = f"{prefix_path}/news/{news_id}"
-            values["link"] = _absolute_public_url(base_url, news_path)
+            payload["link"] = _absolute_public_url(base_url, news_path)
         else:
-            values["link"] = _absolute_public_url(base_url, prefix_path or "/news")
-        return values
+            payload["link"] = _absolute_public_url(base_url, prefix_path or "/news")
+        return payload
 
     class Config:
         orm_mode = True
