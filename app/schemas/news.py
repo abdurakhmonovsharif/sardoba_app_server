@@ -1,7 +1,12 @@
+from __future__ import annotations
+
 from datetime import datetime, date
 from typing import Any, Optional
+from urllib.parse import urljoin
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, root_validator, validator
+
+from app.core.config import get_settings
 
 
 PRIORITY_MAP = {
@@ -44,6 +49,20 @@ def _parse_priority_value(value: Any) -> int:
     if lowered.lstrip("-").isdigit():
         return int(lowered)
     raise ValueError("priority must be a number or one of low/medium/high")
+
+
+def _absolute_public_url(base_url: str | None, path: str | None) -> str | None:
+    if not path:
+        return None
+    stripped = path.strip()
+    if not stripped:
+        return None
+    if stripped.startswith(("http://", "https://")):
+        return stripped
+    if not base_url:
+        return stripped
+    normalized_base = base_url.rstrip("/")
+    return urljoin(normalized_base + "/", stripped.lstrip("/"))
 
 
 class NewsBase(BaseModel):
@@ -107,6 +126,23 @@ class NewsUpdate(BaseModel):
 class NewsRead(NewsBase):
     id: int
     created_at: datetime
+    link: str
+
+    @root_validator(pre=True)
+    def _populate_public_links(cls, values: dict[str, Any]) -> dict[str, Any]:
+        settings = get_settings()
+        base_url = settings.PUBLIC_API_URL
+        values["image_url"] = _absolute_public_url(base_url, values.get("image_url"))
+
+        prefix = settings.API_V1_PREFIX.strip("/")
+        prefix_path = f"/{prefix}" if prefix else ""
+        news_id = values.get("id")
+        if news_id is not None:
+            news_path = f"{prefix_path}/news/{news_id}"
+            values["link"] = _absolute_public_url(base_url, news_path)
+        else:
+            values["link"] = _absolute_public_url(base_url, prefix_path or "/news")
+        return values
 
     class Config:
         orm_mode = True

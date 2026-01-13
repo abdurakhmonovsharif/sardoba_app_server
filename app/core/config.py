@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     DEFAULT_ADMIN_PHONE: str = Field(default="+998931434413", env="DEFAULT_ADMIN_PHONE")
     DEFAULT_ADMIN_PASSWORD: str = Field(default="admin123", env="DEFAULT_ADMIN_PASSWORD")
 
+    PUBLIC_API_URL: str = Field(
+        default="https://api.sardobacashback.uz",
+        env="PUBLIC_API_URL",
+    )
+
     ESKIZ_LOGIN: str = Field(..., env="ESKIZ_LOGIN")
     ESKIZ_PASSWORD: str = Field(..., env="ESKIZ_PASSWORD")
     ESKIZ_FROM_WHOM: str = Field(default="4546", env="ESKIZ_FROM_WHOM")
