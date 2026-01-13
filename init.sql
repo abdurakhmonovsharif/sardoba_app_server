@@ -194,6 +194,7 @@ CREATE INDEX IF NOT EXISTS idx_notification_device_tokens_user_id ON notificatio
 CREATE TABLE IF NOT EXISTS user_notifications (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    notification_id INTEGER REFERENCES notifications(id) ON DELETE CASCADE,
     title VARCHAR(255) NOT NULL,
     description TEXT NOT NULL,
     type VARCHAR(64),
@@ -206,6 +207,7 @@ CREATE TABLE IF NOT EXISTS user_notifications (
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_notifications_user_id ON user_notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_notifications_notification_id ON user_notifications(notification_id);
 
 -- News table
 CREATE TABLE IF NOT EXISTS news (

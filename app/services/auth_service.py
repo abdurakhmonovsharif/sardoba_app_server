@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import httpx
 import logging
 import secrets
 import string
@@ -19,6 +20,7 @@ from app.models import (
     Staff,
     StaffRole,
     User,
+    Card,
     CashbackBalance,
 )
 
@@ -50,13 +52,17 @@ class AuthService:
 
     def request_client_otp(self, *, phone: str, purpose: str, ip: str | None, user_agent: str | None) -> None:
         normalized_purpose = (purpose or "").lower()
-        user_exists = self.db.query(User.id).filter(User.phone == phone).first()
+        active_user_exists = (
+            self.db.query(User.id)
+            .filter(User.phone == phone, User.is_deleted == False)
+            .first()
+        )
         if normalized_purpose == "register":
-            if user_exists:
+            if active_user_exists:
                 raise exceptions.ConflictError("Bu telefon raqamda foydalanuvchu mavjud.")
             self._find_or_create_user_from_iiko(phone)
         else:
-            if not user_exists:
+            if not active_user_exists:
                 synced_user = self._ensure_user_for_login(phone)
                 if not synced_user:
                     raise exceptions.NotFoundError("Bu raqam orqali foydalanuvchi yo'q, iltimos akkaunt yaratishni bosing.")
@@ -99,11 +105,13 @@ class AuthService:
         normalized_purpose = (purpose or "").lower()
         user = self._find_active_user_by_phone(phone)
         iiko_customer = self._fetch_iiko_customer(phone)
+        iiko_customer = self._reactivate_iiko_customer_if_deleted(phone, iiko_customer)
 
         if user:
             self._update_user_profile(user, name, date_of_birth, waiter)
             if iiko_customer:
                 self._sync_user_with_iiko(user, iiko_customer)
+                self._ensure_card_exists(user)
             elif not user.iiko_customer_id:
                 self._ensure_iiko_customer_safe(user, name=name, date_of_birth=date_of_birth)
         else:
@@ -118,9 +126,15 @@ class AuthService:
                     user.waiter = waiter
                 self.db.add(user)
                 self.db.flush()
+            elif user.deleted:
+                user.deleted = False
+                user.deleted_at = None
+                self.db.add(user)
+            self._update_user_profile(user, name, date_of_birth, waiter)
             if iiko_customer:
                 self._sync_user_with_iiko(user, iiko_customer)
-            else:
+                self._ensure_card_exists(user)
+            elif not user.iiko_customer_id:
                 self._ensure_iiko_customer_safe(user, name=name, date_of_birth=date_of_birth)
 
         self.db.flush()
@@ -214,6 +228,7 @@ class AuthService:
         if not user.phone:
             return
         customer = self._fetch_iiko_customer(user.phone)
+        customer = self._reactivate_iiko_customer_if_deleted(user.phone, customer)
         if not customer:
             return
         self._sync_user_with_iiko(user, customer)
@@ -320,7 +335,14 @@ class AuthService:
         try:
             self._ensure_iiko_customer(user, name=name, date_of_birth=date_of_birth)
         except exceptions.ServiceError as exc:
+            cause = getattr(exc, "__cause__", None)
+            if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 400:
+                raise exceptions.ExternalServiceBadRequest(
+                    "Iiko customer creation rejected with Bad Request"
+                ) from exc
             logger.warning("Failed to ensure Iiko customer for %s: %s", user.phone, exc)
+        else:
+            self._ensure_card_exists(user)
 
     def _fetch_iiko_customer(self, phone: str) -> dict[str, Any] | None:
         try:
@@ -328,6 +350,31 @@ class AuthService:
         except exceptions.ServiceError as exc:
             logger.warning("Unable to lookup Iiko customer %s: %s", phone, exc)
             return None
+
+    def _is_iiko_deleted(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            cleaned = value.strip().lower()
+            return cleaned in {"true", "1", "yes", "y"}
+        return False
+
+    def _reactivate_iiko_customer_if_deleted(self, phone: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not payload or not self._is_iiko_deleted(payload.get("isDeleted")):
+            return payload
+        logger.info("Reactivating Iiko customer %s because payload reported deletion", phone)
+        try:
+            self.iiko_service.create_or_update_customer(
+                phone=phone,
+                payload_extra={"isDeleted": False},
+            )
+        except exceptions.ServiceError as exc:
+            logger.warning("Failed to reactivate Iiko customer %s: %s", phone, exc)
+            return payload
+        refreshed = self._fetch_iiko_customer(phone)
+        return refreshed or payload
 
     def _build_customer_payload(self, user: User, *, name: str | None, date_of_birth: date | None) -> dict[str, Any]:
         payload: dict[str, Any] = {"comment": "CASHBACK MOBILE APP CLIENT"}
@@ -374,11 +421,27 @@ class AuthService:
         self.db.add(card)
         self.db.flush()
 
+    def _ensure_card_exists(self, user: User) -> None:
+        if not user.iiko_customer_id:
+            return
+        card_exists = (
+            self.db.query(Card.id)
+            .filter(Card.user_id == user.id)
+            .first()
+        )
+        if card_exists:
+            return
+        try:
+            self._bind_card_to_user(user)
+        except exceptions.ServiceError as exc:
+            logger.warning("Failed to ensure card for user %s: %s", user.phone, exc)
+
     def _ensure_user_for_login(self, phone: str) -> User | None:
         user = self._find_active_user_by_phone(phone)
         if user:
             return user
         iiko_customer = self._fetch_iiko_customer(phone)
+        iiko_customer = self._reactivate_iiko_customer_if_deleted(phone, iiko_customer)
         if not iiko_customer:
             return None
         user = User(phone=phone, name=iiko_customer.get("fullName"))
@@ -388,10 +451,11 @@ class AuthService:
         return user
 
     def _find_or_create_user_from_iiko(self, phone: str) -> User | None:
-        user = self._find_active_user_by_phone(phone)
+        user = self.db.query(User).filter(User.phone == phone).first()
         if user:
             return user
         iiko_customer = self._fetch_iiko_customer(phone)
+        iiko_customer = self._reactivate_iiko_customer_if_deleted(phone, iiko_customer)
         if not iiko_customer:
             return None
         user = User(phone=phone, name=iiko_customer.get("fullName"))

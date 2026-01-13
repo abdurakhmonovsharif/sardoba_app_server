@@ -80,12 +80,14 @@ class UserNotificationService:
         user_id: int,
         title: str,
         description: str,
+        notification_id: int | None = None,
         notification_type: str | None = None,
         payload: dict[str, Any] | None = None,
         language: str = "ru",
     ) -> UserNotification:
         notification = UserNotification(
             user_id=user_id,
+            notification_id=notification_id,
             title=title,
             description=description,
             type=notification_type,

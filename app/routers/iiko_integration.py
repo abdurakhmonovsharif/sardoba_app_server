@@ -54,7 +54,6 @@ def _find_user_for_identifiers(
     return (
         db.query(User)
         .filter(
-            User.iiko_wallet_id == wallet_id,
             User.iiko_customer_id == customer_id,
             User.phone == phone,
             User.is_deleted == False,

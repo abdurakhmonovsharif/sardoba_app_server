@@ -30,6 +30,10 @@ class AuthorizationError(ServiceError):
     pass
 
 
+class ExternalServiceBadRequest(ServiceError):
+    """Raised when an external service rejects a payload with Bad Request (400)."""
+
+
 class NotFoundError(ServiceError):
     pass
 

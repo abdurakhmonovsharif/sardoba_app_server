@@ -35,6 +35,7 @@ from .catalog import (
 )
 from .common import AuthLogRead, AuthLogActor, AuthLogListResponse, Pagination, TokenResponse
 from .news import NewsCreate, NewsRead, NewsUpdate
+from .files import FileRead, FileListResponse
 from .notification import (
     NotificationCreate,
     NotificationRead,
@@ -115,4 +116,6 @@ __all__ = [
     "UserListResponse",
     "UserDetail",
     "AdminUserUpdate",
+    "FileRead",
+    "FileListResponse",
 ]

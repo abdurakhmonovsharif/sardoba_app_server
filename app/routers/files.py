@@ -1,3 +1,5 @@
+import logging
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,11 +12,65 @@ from app.core.dependencies import get_current_client, get_current_manager, get_d
 from app.core.localization import localize_message
 from app.core.storage import NEWS_IMAGE_DIR, PROFILE_PHOTO_DIR, extract_profile_photo_name, news_image_path, profile_photo_path
 from app.models import Staff, User
-from app.schemas import UserRead
+from app.schemas import UserRead, FileListResponse, FileRead, Pagination
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 router = APIRouter(prefix="/files", tags=["files"])
+logger = logging.getLogger(__name__)
+
+
+@router.get("", response_model=FileListResponse)
+def list_files(
+    page: int = Depends(lambda page: int(page) if page else 1),
+    page_size: int = Depends(lambda page_size: int(page_size) if page_size else 12),
+    manager: Staff = Depends(get_current_manager),
+) -> FileListResponse:
+    all_files: list[FileRead] = []
+    settings = get_settings()
+
+    # Profile photos
+    if PROFILE_PHOTO_DIR.exists():
+        for f in PROFILE_PHOTO_DIR.iterdir():
+            if f.is_file() and not f.name.startswith("."):
+                stats = f.stat()
+                all_files.append(
+                    FileRead(
+                        name=f.name,
+                        url=f"{settings.API_V1_PREFIX}/files/profile-photo/{f.name}",
+                        size=stats.st_size,
+                        created_at=datetime.fromtimestamp(stats.st_ctime),
+                        type="profile_photo",
+                    )
+                )
+
+    # News images
+    if NEWS_IMAGE_DIR.exists():
+        for f in NEWS_IMAGE_DIR.iterdir():
+            if f.is_file() and not f.name.startswith("."):
+                stats = f.stat()
+                all_files.append(
+                    FileRead(
+                        name=f.name,
+                        url=f"{settings.API_V1_PREFIX}/files/news_images/{f.name}",
+                        size=stats.st_size,
+                        created_at=datetime.fromtimestamp(stats.st_ctime),
+                        type="news_image",
+                    )
+                )
+
+    # Sort by creation time desc
+    all_files.sort(key=lambda x: x.created_at, reverse=True)
+
+    total = len(all_files)
+    start = (page - 1) * page_size
+    end = start + page_size
+    items = all_files[start:end]
+
+    return FileListResponse(
+        pagination=Pagination(page=page, size=page_size, total=total),
+        items=items,
+    )
 
 
 @router.post("/profile-photo", response_model=UserRead, status_code=status.HTTP_201_CREATED)
@@ -83,17 +139,6 @@ def delete_profile_photo(
         db.commit()
 
 
-async def _ensure_news_upload_file(
-    request: Request,
-) -> UploadFile:
-    form = await request.form()
-    for key in ("file", "image", "news_image"):
-        candidate = form.get(key)
-        if isinstance(candidate, UploadFile):
-            return candidate
-    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=localize_message("Missing filename"))
-
-
 async def _store_news_image(upload_file: UploadFile, manager: Staff) -> dict[str, str]:
     ext = Path(upload_file.filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -113,19 +158,27 @@ async def _store_news_image(upload_file: UploadFile, manager: Staff) -> dict[str
 
 @router.post("/news_images", status_code=status.HTTP_201_CREATED)
 async def upload_news_image(
-    upload_file: UploadFile = Depends(_ensure_news_upload_file),
+    file: UploadFile = File(None),
+    image: UploadFile = File(None),
+    news_image: UploadFile = File(None),
     manager: Staff = Depends(get_current_manager),
 ) -> dict[str, str]:
+    upload_file = file or image or news_image
+    if not upload_file:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=localize_message("Missing filename"))
     return await _store_news_image(upload_file, manager)
 
 
-@router.post("/news-image", include_in_schema=False)
-async def upload_news_image_legacy(
-    request: Request,
+@router.post("/news-images", status_code=status.HTTP_201_CREATED, include_in_schema=False)
+@router.post("/news-image", status_code=status.HTTP_201_CREATED, include_in_schema=False)
+@router.post("/news_image", status_code=status.HTTP_201_CREATED, include_in_schema=False)
+async def upload_news_image_aliases(
+    file: UploadFile = File(None),
+    image: UploadFile = File(None),
+    news_image: UploadFile = File(None),
     manager: Staff = Depends(get_current_manager),
 ) -> dict[str, str]:
-    upload_file = await _ensure_news_upload_file(request)
-    return await _store_news_image(upload_file, manager)
+    return await upload_news_image(file, image, news_image, manager)
 
 
 @router.get("/news_images/{file_name}")

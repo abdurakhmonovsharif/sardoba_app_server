@@ -48,9 +48,7 @@ def list_users(
 
     if target_waiter is not None:
         query = query.filter(User.waiter_id == target_waiter)
-    else:
-        query = query.filter(User.waiter_id.isnot(None))
-
+   
     if search:
         pattern = f"%{search}%"
         query = query.filter(or_(User.name.ilike(pattern), User.phone.ilike(pattern)))
@@ -79,7 +77,6 @@ def get_user_by_id(
         .filter(
             User.id == user_id,
             User.is_deleted == False,  # noqa: E712
-            User.waiter_id.isnot(None),
         )
         .first()
     )
@@ -179,7 +176,6 @@ def admin_update_user(
         .filter(
             User.id == user_id,
             User.is_deleted == False,  # noqa: E712
-            User.waiter_id.isnot(None),
         )
         .first()
     )

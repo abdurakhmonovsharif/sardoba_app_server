@@ -181,3 +181,34 @@ def test_cashback_use_succeeds(client, session_factory):
     assert resp_data["can_use_cashback"] is True
     assert Decimal(resp_data["balance"]) == Decimal("60000")
     assert resp_data["message"]["uz"] == "Keshbek bilan to'lovga ruxsat beriladi."
+
+
+def test_manual_35k_cashback_sets_gift_flag(client, session_factory):
+    session = session_factory()
+    manager = _create_manager(session, phone="+998900000006")
+    user = _create_user(session, phone="+998901234572")
+    session.close()
+
+    login_resp = client.post(
+        "/api/v1/auth/staff/login",
+        json={"phone": manager.phone, "password": "secret123"},
+    )
+    assert login_resp.status_code == 200
+    token = login_resp.json()["tokens"]["access_token"]
+
+    add_resp = client.post(
+        "/api/v1/cashback/add",
+        json={
+            "user_id": user.id,
+            "amount": "35000",
+            "branch_id": SardobaBranch.SARDOBA_GEOFIZIKA.value,
+            "source": "MANUAL",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert add_resp.status_code == 200
+
+    session = session_factory()
+    user_db = session.query(User).filter(User.id == user.id).one()
+    assert user_db.giftget is True
+    session.close()

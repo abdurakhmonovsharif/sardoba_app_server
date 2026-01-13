@@ -43,6 +43,9 @@ class NotificationService:
     def delete_notification(self, *, actor: Staff, notification_id: int) -> None:
         self._ensure_manager(actor)
         notification = self.get_notification(notification_id)
+        self.db.query(UserNotification).filter(
+            UserNotification.notification_id == notification_id
+        ).delete(synchronize_session=False)
         self.db.delete(notification)
         self.db.commit()
 
@@ -59,6 +62,7 @@ class NotificationService:
         records = [
             UserNotification(
                 user_id=user_id,
+                notification_id=notification.id,
                 title=notification.title,
                 description=notification.description,
                 type=None,

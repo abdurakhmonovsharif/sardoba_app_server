@@ -9,6 +9,8 @@ services:
       - .env
     depends_on:
       - redis
+    volumes:
+      - ./media:/app/media
 
   redis:
     image: redis:7-alpine

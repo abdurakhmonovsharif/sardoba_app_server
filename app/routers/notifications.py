@@ -159,6 +159,7 @@ def list_client_notifications(
         for item in global_items:
             service.create_notification(
                 user_id=current_user.id,
+                notification_id=item.id,
                 title=item.title,
                 description=item.description,
                 notification_type=None,

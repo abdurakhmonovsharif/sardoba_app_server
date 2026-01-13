@@ -17,6 +17,9 @@ from . import exceptions
 from .push_notification_service import PushNotificationService
 
 
+GIFT_REFILL_AMOUNT = Decimal("35000")
+
+
 class CashbackService:
     def __init__(self, db: Session):
         self.db = db
@@ -98,6 +101,13 @@ class CashbackService:
         print("cashback = ", cashback.__dict__)
         self.db.add(cashback)
         self.db.flush()
+        if (
+            source == CashbackSource.MANUAL
+            and amount.copy_abs() == GIFT_REFILL_AMOUNT
+            and not user.giftget
+        ):
+            user.giftget = True
+            self.db.add(user)
         self.db.commit()
         self.db.refresh(cashback)
         try:

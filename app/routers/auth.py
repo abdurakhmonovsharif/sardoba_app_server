@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Query, status
 from sqlalchemy.orm import Session
 
+from app.core.db import session_scope
 from app.core.dependencies import (
     get_current_manager,
     get_current_staff,
@@ -32,6 +34,18 @@ from app.services import exceptions as service_exceptions
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 _FALLBACK_DEMO_PHONE = "+998911111111"
+logger = logging.getLogger(__name__)
+
+
+def _sync_user_from_iiko_background(user_id: int) -> None:
+    with session_scope() as session:
+        user = session.query(User).filter(User.id == user_id).first()
+        if not user:
+            return
+        try:
+            AuthService(session).sync_user_from_iiko(user)
+        except Exception:
+            logger.exception("Background Iiko sync failed for user %s", user_id)
 
 
 @router.post("/client/request-otp", status_code=status.HTTP_204_NO_CONTENT)
@@ -80,6 +94,8 @@ def verify_client_otp(
             user_agent=getattr(request.state, "user_agent", None),
         )
     except (service_exceptions.OTPExpired, service_exceptions.OTPInvalid) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=localize_message(str(exc))) from exc
+    except service_exceptions.ExternalServiceBadRequest as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=localize_message(str(exc))) from exc
     except service_exceptions.NotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=localize_message(str(exc))) from exc
@@ -190,6 +206,7 @@ def refresh_tokens(payload: RefreshRequest, db: Session = Depends(get_db)) -> To
 
 @router.get("/me")
 def read_profile(
+    background_tasks: BackgroundTasks,
     payload: dict = Depends(get_token_payload),
     db: Session = Depends(get_db),
     cashback_limit: int = 10,
@@ -234,8 +251,7 @@ def read_profile(
         user = db.query(User).filter(User.id == subject).first()
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=localize_message("User not found"))
-        auth_service = AuthService(db)
-        auth_service.sync_user_from_iiko(user)
+        background_tasks.add_task(_sync_user_from_iiko_background, user.id)
         cashback_service = CashbackService(db)
         transactions = cashback_service.get_user_cashbacks(user_id=user.id, limit=cashback_limit)
         loyalty = cashback_service.loyalty_summary(user=user)

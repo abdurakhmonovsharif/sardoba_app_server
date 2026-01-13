@@ -113,10 +113,10 @@ Token registration endpoint:
 ## Account deletion & re-registration
 
 On delete the backend:
-1. Generates a unique pseudo-number in the form `+999XXXXXXXXX`.
-2. Marks the user as deleted and overwrites `phone` with the pseudo-number.
-3. Writes the released real phone to `deleted_phones`.
-4. Calls IIKO with `isDeleted=true` for that customer.
+1. Generates a unique pseudo-number in the form `+999XXXXXXXXX`, overwrites the user's phone, and stores the released real number in `deleted_phones`.
+2. Marks the user as deleted (`is_deleted=true`, `deleted_at` set) and calls IIKO with `isDeleted=true` for the fake contact.
+
+Deleted users cannot log in; when a client registers again with the same real phone we restore the former record (remove the deleted flag, restore the phone, and delete the `deleted_phones` entry), re-sync the profile with IIKO, and issue fresh tokens.
 
 Deletion endpoints:
 - `DELETE /api/v1/users/me` → `204 No Content`
