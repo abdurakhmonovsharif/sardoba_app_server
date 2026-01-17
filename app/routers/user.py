@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -59,9 +60,18 @@ def list_users(
         .limit(page_size)
         .all()
     )
+    is_waiter_request = staff.role == StaffRole.WAITER
+    zero_balance = Decimal("0")
+    user_items: list[UserRead] = []
+    for user in users:
+        user_payload = UserRead.from_orm(user)
+        if is_waiter_request:
+            # Hide actual cashback balance for waiters by always returning zero.
+            user_payload = user_payload.copy(update={"cashback_balance": zero_balance})
+        user_items.append(user_payload)
     return UserListResponse(
         pagination={"page": page, "size": page_size, "total": total},
-        items=[UserRead.from_orm(user) for user in users],
+        items=user_items,
     )
 
 
