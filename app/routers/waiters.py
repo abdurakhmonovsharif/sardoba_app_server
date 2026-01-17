@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.core.dependencies import get_current_manager, get_db
 from app.core.localization import localize_message
 from app.models import Staff
+from app.models.enums import SardobaBranch
 from app.schemas import StaffListResponse, StaffRead, WaiterCreateRequest, WaiterUpdateRequest
 from app.services import StaffService
 from app.services import exceptions as service_exceptions
@@ -16,11 +17,15 @@ def list_waiters(
     search: str | None = Query(default=None, min_length=1),
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=100),
+    branch_id: SardobaBranch | None = Query(default=None),
     manager: Staff = Depends(get_current_manager),
     db: Session = Depends(get_db),
 ) -> StaffListResponse:
     service = StaffService(db)
-    total, waiters = service.list_waiters(page=page, size=size, search=search)
+    branch_value = branch_id.value if branch_id is not None else None
+    total, waiters = service.list_waiters(
+        page=page, size=size, search=search, branch_id=branch_value
+    )
     return StaffListResponse(
         pagination={"page": page, "size": size, "total": total},
         items=[StaffRead.from_orm(waiter) for waiter in waiters],

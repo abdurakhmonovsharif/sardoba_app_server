@@ -17,8 +17,17 @@ class StaffService:
     def __init__(self, db: Session):
         self.db = db
 
-    def list_waiters(self, *, page: int, size: int, search: Optional[str] = None) -> Tuple[int, list[Staff]]:
+    def list_waiters(
+        self,
+        *,
+        page: int,
+        size: int,
+        search: Optional[str] = None,
+        branch_id: Optional[int] = None,
+    ) -> Tuple[int, list[Staff]]:
         query = self.db.query(Staff).filter(Staff.role == StaffRole.WAITER)
+        if branch_id is not None:
+            query = query.filter(Staff.branch_id == branch_id)
         if search:
             pattern = f"%{search}%"
             query = query.filter(or_(Staff.name.ilike(pattern), Staff.phone.ilike(pattern)))
