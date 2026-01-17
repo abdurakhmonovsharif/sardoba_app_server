@@ -91,7 +91,16 @@ class AuthService:
         user_agent: str | None,
     ) -> tuple[User, dict[str, str]]:
         otp = self.otp_service.verify_otp(phone=phone, code=code, purpose=purpose)
-
+        request_payload = {
+            "phone": phone,
+            "code": code,
+            "purpose": purpose,
+            "name": name,
+            "waiter_referral_code": waiter_referral_code,
+            "date_of_birth": date_of_birth.isoformat() if date_of_birth else None,
+        }
+        logger.info("Verify client OTP request body: %s", request_payload)
+        print(f"Verify client OTP request body: {request_payload}")
         waiter = None
         if waiter_referral_code:
             waiter = (

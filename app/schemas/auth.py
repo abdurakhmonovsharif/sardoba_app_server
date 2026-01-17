@@ -16,7 +16,7 @@ class ClientOTPVerify(BaseModel):
     phone: str = Field(..., regex=r"^\+?\d{7,15}$")
     code: str = Field(..., min_length=4, max_length=8)
     name: Optional[str] = Field(default=None, max_length=150)
-    waiter_referral_code: Optional[str] = Field(default=None, max_length=12)
+    waiter_referral_code: Optional[str] = Field(default=None, max_length=12, alias="referral_code")
     purpose: str = Field(default="login")
     date_of_birth: Optional[date] = None
 
@@ -37,6 +37,9 @@ class ClientOTPVerify(BaseModel):
             return datetime.fromisoformat(str_value).date()
         except ValueError as exc:
             raise ValueError("date_of_birth must be in format dd.mm.yyyy or yyyy-mm-dd") from exc
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class StaffLoginRequest(BaseModel):

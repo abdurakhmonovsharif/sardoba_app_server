@@ -82,6 +82,7 @@ def verify_client_otp(
     db: Session = Depends(get_db),
 ) -> dict:
     service = AuthService(db)
+    print(f"Received verify_client_otp request with payload: {payload.dict()}")
     try:
         user, tokens = service.verify_client_otp(
             phone=payload.phone,
