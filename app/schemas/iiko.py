@@ -13,6 +13,7 @@ class IikoTransactionType(str, Enum):
     REFILL_WALLET = "RefillWallet"         # bonus/hisob to‘ldirish ← yangi!
     REFILL_WALLET_FROM_ORDER = "RefillWalletFromOrder"
     SIMPLE_PUSH = "SimplePush"
+    WELCOMEBONUS = "WelcomeBonus"
 
 
 class IikoWebhookPayload(BaseModel):

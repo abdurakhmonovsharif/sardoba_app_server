@@ -128,6 +128,7 @@ async def iiko_webhook(
             branch_id=None,
             source=CashbackSource.MANUAL,
             staff_id=None,
+            transaction_type=payload.transactionType,
             event_id=payload.id,
             uoc_id=payload.uocId,
             balance_override=balance_override,

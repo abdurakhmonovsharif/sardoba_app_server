@@ -1,5 +1,6 @@
 import logging
 from decimal import Decimal
+from typing import Optional
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -12,6 +13,7 @@ from app.models import (
     StaffRole,
     User,
 )
+from app.schemas.iiko import IikoTransactionType
 
 from . import exceptions
 from .push_notification_service import PushNotificationService
@@ -48,68 +50,120 @@ class CashbackService:
             branch_id=branch_id,
             source=source,
             staff_id=actor.id,
+            transaction_type=IikoTransactionType.ACCRUAL,
         )
 
     def adjust_cashback_balance(
         self,
         *,
         user: User,
-        amount: Decimal,
+        amount: Optional[Decimal],
         branch_id: int | None,
         source: CashbackSource,
         staff_id: int | None,
+        transaction_type: IikoTransactionType,
         balance_override: Decimal | None = None,
         earn_points: bool = True,
         event_id: str | None = None,
         uoc_id: str | None = None,
         push_only_notification: bool = False,
-    ) -> CashbackTransaction:
+    ) -> Optional[CashbackTransaction]:
+        """
+        Safely adjusts cashback balance based on IIKO transaction type.
+        NEVER raises on webhook events.
+        """
 
-        balance = (
-            self.db.query(CashbackBalance)
-            .filter(CashbackBalance.user_id == user.id)
-            .with_for_update()
-            .first()
-        )
-        if not balance:
-            balance = CashbackBalance(
-                user_id=user.id, balance=Decimal("0.00"), points=Decimal("0.00")
+        if transaction_type == IikoTransactionType.SIMPLE_PUSH:
+            self._logger.info(
+                "SimplePush received. No balance change. user_id=%s event_id=%s",
+                user.id,
+                event_id,
             )
-            self.db.add(balance)
+            return None
+
+        balance_required_types = {
+            IikoTransactionType.ACCRUAL,
+            IikoTransactionType.PAY_FROM_WALLET,
+            IikoTransactionType.CORRECTION,
+            IikoTransactionType.REFILL_WALLET,
+            IikoTransactionType.REFILL_WALLET_FROM_ORDER,
+            IikoTransactionType.WELCOMEBONUS,
+        }
+
+        if transaction_type in balance_required_types and amount is None:
+            self._logger.warning(
+                "Balance change skipped: amount is None | "
+                "user_id=%s type=%s event_id=%s uoc_id=%s",
+                user.id,
+                transaction_type,
+                event_id,
+                uoc_id,
+            )
+            return None
+
+        amount = amount or Decimal("0")
+
+        try:
+            balance = (
+                self.db.query(CashbackBalance)
+                .filter(CashbackBalance.user_id == user.id)
+                .with_for_update()
+                .first()
+            )
+
+            if not balance:
+                balance = CashbackBalance(
+                    user_id=user.id,
+                    balance=Decimal("0.00"),
+                    points=Decimal("0.00"),
+                )
+                self.db.add(balance)
+                self.db.flush()
+
+            zero = Decimal("0.00")
+            current_balance = balance.balance or zero
+
+            if balance_override is not None:
+                new_balance = balance_override
+            else:
+                if transaction_type == IikoTransactionType.PAY_FROM_WALLET:
+                    new_balance = current_balance - amount.copy_abs()
+                else:
+                    new_balance = current_balance + amount
+
+            balance.balance = new_balance
+            balance.points = balance.points or zero
+
+            cashback = CashbackTransaction(
+                user_id=user.id,
+                staff_id=staff_id,
+                amount=amount,
+                branch_id=branch_id,
+                source=source,
+                balance_after=new_balance,
+                iiko_event_id=event_id,
+                iiko_uoc_id=uoc_id,
+            )
+
+            self.db.add(cashback)
             self.db.flush()
 
-        zero = Decimal("0")
-        current_balance = balance.balance or zero
-        if balance_override is not None:
-            new_balance = balance_override
-        else:
-            new_balance = current_balance + amount
-        balance.balance = new_balance
+            if transaction_type == IikoTransactionType.WELCOMEBONUS and not user.giftget:
+                user.giftget = True
+                self.db.add(user)
 
-        # Loyalty levels and point accrual are temporarily disabled.
-        balance.points = balance.points or zero
-        cashback = CashbackTransaction(
-            user_id=user.id,
-            staff_id=staff_id,
-            amount=amount,
-            branch_id=branch_id,
-            source=source,
-            balance_after=new_balance,
-            iiko_event_id=event_id,
-            iiko_uoc_id=uoc_id,
-        )
-        print("cashback = ", cashback.__dict__)
-        self.db.add(cashback)
-        self.db.flush()
-        if (
-            source == CashbackSource.MANUAL
-            and amount.copy_abs() == GIFT_REFILL_AMOUNT
-            and not user.giftget
-        ):
-            user.giftget = True
-            self.db.add(user)
-        self.db.commit()
-        self.db.refresh(cashback)
+            self.db.commit()
+            self.db.refresh(cashback)
+
+        except Exception:
+            self.db.rollback()
+            self._logger.exception(
+                "Failed to adjust cashback balance | user_id=%s type=%s",
+                user.id,
+                transaction_type,
+            )
+            return None
+
         try:
             PushNotificationService(self.db).notify_cashback_change(
                 user.id,
@@ -117,7 +171,12 @@ class CashbackService:
                 persist=not push_only_notification,
             )
         except Exception as exc:
-            self._logger.warning("Failed to send push for cashback change: %s", exc)
+            self._logger.warning(
+                "Push notification failed | user_id=%s error=%s",
+                user.id,
+                exc,
+            )
+
         return cashback
 
     def get_user_cashbacks(
