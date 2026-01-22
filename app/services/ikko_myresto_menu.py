@@ -9,6 +9,7 @@ for the mobile application.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -69,6 +70,7 @@ _stoplist_cache: Dict[int, tuple[float, Set[str]]] = {}
 _menu_response_cache: Optional[tuple[float, Dict[str, Any]]] = None
 
 _http_client = httpx.Client(timeout=HTTP_TIMEOUT)
+logger = logging.getLogger(__name__)
 
 
 def _unique(values: Iterable[str]) -> List[str]:
@@ -87,11 +89,15 @@ def _get_json(url: str, ttl: int, cache: Dict[str, tuple[float, Any]]) -> Any:
         ts, data = cache[url]
         if now - ts < ttl:
             return data
-    response = _http_client.get(url)
-    response.raise_for_status()
-    data = response.json()
-    cache[url] = (now, data)
-    return data
+    try:
+        response = _http_client.get(url)
+        response.raise_for_status()
+        data = response.json()
+        cache[url] = (now, data)
+        return data
+    except httpx.HTTPError as exc:
+        logger.warning("Failed to fetch menu url=%s: %s", url, exc)
+        raise
 
 
 def fetch_menu(url: str) -> Any:
@@ -299,7 +305,21 @@ def get_simplified_menu(urls: Optional[Sequence[str]] = None) -> Dict[str, Any]:
             if time.time() - ts < MENU_RESPONSE_CACHE_TTL:
                 return deepcopy(cached_value)
 
-    payloads = [fetch_menu(url) for url in target_urls]
+    payloads: list[Any] = []
+    for url in target_urls:
+        try:
+            payloads.append(fetch_menu(url))
+        except httpx.HTTPError:
+            continue
+
+    if not payloads:
+        if _menu_response_cache:
+            _, cached_value = _menu_response_cache
+            logger.warning("Returning cached menu because all sources failed")
+            return deepcopy(cached_value)
+        logger.error("All menu sources failed and no cache available")
+        return {"success": False, "categories": []}
+
     merged = merge_menus(payloads)
 
     if not urls or urls == DEFAULT_MENU_URLS:

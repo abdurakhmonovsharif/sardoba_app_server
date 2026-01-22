@@ -43,7 +43,7 @@ def _sync_user_from_iiko_background(user_id: int) -> None:
         if not user:
             return
         try:
-            AuthService(session).sync_user_from_iiko(user)
+            AuthService(session).sync_user_from_iiko(user, create_if_missing=True)
         except Exception:
             logger.exception("Background Iiko sync failed for user %s", user_id)
 

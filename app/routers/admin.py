@@ -55,7 +55,7 @@ def sync_users_with_iiko(
 
         for user in users:
             try:
-                service.sync_user_from_iiko(user)
+                service.sync_user_from_iiko(user, create_if_missing=True)
                 db.flush()
                 synced += 1
             except Exception as exc:  # pragma: no cover - admin maintenance endpoint

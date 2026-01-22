@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+import time
 from decimal import Decimal
 import httpx
 import logging
@@ -100,7 +101,6 @@ class AuthService:
             "date_of_birth": date_of_birth.isoformat() if date_of_birth else None,
         }
         logger.info("Verify client OTP request body: %s", request_payload)
-        print(f"Verify client OTP request body: {request_payload}")
         waiter = None
         if waiter_referral_code:
             waiter = (
@@ -233,14 +233,38 @@ class AuthService:
             user.cashback_wallet.balance = balance_decimal
         self.db.add(user.cashback_wallet)
 
-    def sync_user_from_iiko(self, user: User) -> None:
-        if not user.phone:
+    def sync_user_from_iiko(
+        self,
+        user: User,
+        *,
+        create_if_missing: bool = False,
+        max_create_attempts: int = 2,
+        create_retry_delay: float = 1.0,
+    ) -> None:
+        if not user.phone or user.is_deleted:
             return
         customer = self._fetch_iiko_customer(user.phone)
         customer = self._reactivate_iiko_customer_if_deleted(user.phone, customer)
         if not customer:
-            return
+            if not create_if_missing:
+                return
+            attempts = max(1, max_create_attempts)
+            for attempt in range(attempts):
+                created = self._ensure_iiko_customer_safe(
+                    user,
+                    name=user.name,
+                    date_of_birth=user.date_of_birth,
+                )
+                if created:
+                    customer = self._fetch_iiko_customer(user.phone) or created
+                if customer:
+                    break
+                if attempt + 1 < attempts and create_retry_delay > 0:
+                    time.sleep(create_retry_delay)
+            if not customer:
+                return
         self._sync_user_with_iiko(user, customer)
+        self._ensure_card_exists(user)
         self.db.flush()
 
     def _assign_wallet_to_user(self, user: User, wallet_id: str) -> None:
@@ -333,16 +357,17 @@ class AuthService:
             return "female"
         return candidate
 
-    def _ensure_iiko_customer(self, user: User, *, name: str | None, date_of_birth: date | None) -> None:
+    def _ensure_iiko_customer(self, user: User, *, name: str | None, date_of_birth: date | None) -> dict[str, Any]:
         payload = self._build_customer_payload(user, name=name, date_of_birth=date_of_birth)
         response = self.iiko_service.create_or_update_customer(phone=user.phone, payload_extra=payload)
         self._sync_user_with_iiko(user, response)
         if not user.cards:
             self._bind_card_to_user(user)
+        return response
 
-    def _ensure_iiko_customer_safe(self, user: User, *, name: str | None, date_of_birth: date | None) -> None:
+    def _ensure_iiko_customer_safe(self, user: User, *, name: str | None, date_of_birth: date | None) -> dict[str, Any] | None:
         try:
-            self._ensure_iiko_customer(user, name=name, date_of_birth=date_of_birth)
+            response = self._ensure_iiko_customer(user, name=name, date_of_birth=date_of_birth)
         except exceptions.ServiceError as exc:
             cause = getattr(exc, "__cause__", None)
             if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 400:
@@ -350,8 +375,10 @@ class AuthService:
                     "Iiko customer creation rejected with Bad Request"
                 ) from exc
             logger.warning("Failed to ensure Iiko customer for %s: %s", user.phone, exc)
+            return None
         else:
             self._ensure_card_exists(user)
+            return response
 
     def _fetch_iiko_customer(self, phone: str) -> dict[str, Any] | None:
         try:

@@ -112,8 +112,10 @@ class IikoService:
             raise
         if not response.content:
             return {}
-        print(response.json())
-        return response.json()
+        payload = response.json()
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Iiko response %s %s -> %s", method, path, payload)
+        return payload
 
     def get_customer_by_phone(self, phone: str) -> dict[str, Any] | None:
         payload = {"organizationId": self.settings.IIKO_ORGANIZATION_ID, "phone": phone, "type": "phone"}
