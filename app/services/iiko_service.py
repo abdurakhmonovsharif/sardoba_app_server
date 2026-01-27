@@ -18,15 +18,20 @@ logger = logging.getLogger("iiko.service")
 class IikoService:
     TOKEN_CACHE_KEY = "iiko:access_token"
     TOKEN_TTL_BUFFER_SECONDS = 30
-    TOKEN_FETCH_TIMEOUT = httpx.Timeout(connect=5.0, read=12.0, write=5.0, pool=12.0)
+    CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
+    TOKEN_FETCH_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
     TOKEN_LOCK_KEY = "iiko:access_token:lock"
     TOKEN_LOCK_TTL_SECONDS = 15
     TOKEN_LOCK_WAIT_SECONDS = 5
     TOKEN_LOCK_SLEEP_SECONDS = 0.05
+    IDEMPOTENT_PATHS = {
+        "/api/1/access_token",
+        "/api/1/loyalty/iiko/customer/info",  # iiko uses POST but it is a pure read
+    }
 
     def __init__(self):
         self.settings = get_settings()
-        self._client = httpx.Client(base_url=self.settings.IIKO_API_BASE_URL, timeout=httpx.Timeout(5.0))
+        self._client = httpx.Client(base_url=self.settings.IIKO_API_BASE_URL, timeout=self.CLIENT_TIMEOUT)
         self._local_token_lock = threading.Lock()
         # Detect backend once to decide lock strategy
         self._cache_backend = cache_manager.get_backend()
@@ -100,34 +105,21 @@ class IikoService:
                 self._local_token_lock.release()
 
     def _fetch_token(self) -> str:
-        attempts = 2
-        last_exc: Exception | None = None
-        for attempt in range(1, attempts + 1):
-            try:
-                response = self._client.post(
-                    "/api/1/access_token",
-                    json={"apiLogin": self.settings.IIKO_API_LOGIN},
-                    timeout=self.TOKEN_FETCH_TIMEOUT,
-                )
-                response.raise_for_status()
-                payload = response.json()
-                token = payload.get("token")
-                if not token:
-                    raise exceptions.ServiceError("Iiko access token missing in response")
-                ttl = self._extract_ttl(payload)
-                self._set_cached_token(token, ttl)
-                return token
-            except httpx.TimeoutException as exc:
-                last_exc = exc
-                logger.warning(
-                    "Iiko access_token request timed out (attempt %s/%s)", attempt, attempts
-                )
-            except httpx.HTTPError as exc:
-                last_exc = exc
-                logger.exception("Unable to refresh Iiko access token")
-                break
-            time.sleep(0.2 * attempt)
-        raise exceptions.ServiceError("Failed to obtain Iiko access token") from last_exc
+        response = self._send_request(
+            "POST",
+            "/api/1/access_token",
+            json={"apiLogin": self.settings.IIKO_API_LOGIN},
+            headers={},
+            timeout_override=self.TOKEN_FETCH_TIMEOUT,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        token = payload.get("token")
+        if not token:
+            raise exceptions.ServiceError("Iiko access token missing in response")
+        ttl = self._extract_ttl(payload)
+        self._set_cached_token(token, ttl)
+        return token
 
     def _get_token(self, *, force: bool = False) -> str:
         if not force:
@@ -155,15 +147,83 @@ class IikoService:
         *,
         json: dict[str, Any] | None = None,
         headers: dict[str, str],
+        timeout_override: httpx.Timeout | None = None,
     ) -> httpx.Response:
-        try:
-            return self._client.request(method, path, json=json, headers=headers)
-        except httpx.RequestError as exc:
-            if isinstance(exc, httpx.TimeoutException):
-                logger.warning("Iiko request %s %s timed out", method, path)
-                raise exceptions.ServiceError("Iiko request timed out") from exc
-            logger.warning("Iiko request %s %s failed: %s", method, path, exc)
-            raise exceptions.ServiceError("Iiko request failed") from exc
+        attempts = 3
+        is_idempotent = self._is_idempotent(method, path)
+        last_exc: httpx.RequestError | None = None
+
+        for attempt in range(1, attempts + 1):
+            started = time.perf_counter()
+            try:
+                return self._client.request(
+                    method,
+                    path,
+                    json=json,
+                    headers=headers,
+                    timeout=timeout_override or self._client.timeout,
+                )
+            except httpx.RequestError as exc:
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                stage = self._timeout_stage(exc)
+                should_retry = self._should_retry(exc, is_idempotent)
+                timeouts = timeout_override or self._client.timeout
+                logger.warning(
+                    "Iiko request %s %s failed at %s (%s) attempt %s/%s after %.0f ms | connect=%ss read=%ss write=%ss pool=%ss",
+                    method,
+                    path,
+                    stage,
+                    exc.__class__.__name__,
+                    attempt,
+                    attempts,
+                    elapsed_ms,
+                    timeouts.connect,
+                    timeouts.read,
+                    timeouts.write,
+                    timeouts.pool,
+                )
+                last_exc = exc
+                if not should_retry or attempt == attempts:
+                    break
+                time.sleep(self._retry_delay(attempt))
+
+        assert last_exc is not None
+        if isinstance(last_exc, httpx.TimeoutException):
+            raise exceptions.ServiceError(f"Iiko request timed out ({last_exc.__class__.__name__})") from last_exc
+        raise exceptions.ServiceError("Iiko request failed") from last_exc
+
+    def _timeout_stage(self, exc: httpx.RequestError) -> str:
+        mapping: list[tuple[type[BaseException], str]] = [
+            (httpx.ConnectTimeout, "connect"),
+            (httpx.ReadTimeout, "read"),
+            (httpx.WriteTimeout, "write"),
+            (httpx.PoolTimeout, "pool"),
+            (httpx.ConnectError, "connect"),
+        ]
+        for exc_type, stage in mapping:
+            if isinstance(exc, exc_type):
+                return stage
+        if isinstance(exc, httpx.TimeoutException):
+            return "timeout"
+        return "unknown"
+
+    def _should_retry(self, exc: httpx.RequestError, is_idempotent: bool) -> bool:
+        # Transport-level issues (connect/pool) are always safe to retry.
+        if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout)):
+            return True
+        # Read timeout means the request reached server; retry only for idempotent operations.
+        if isinstance(exc, httpx.ReadTimeout):
+            return is_idempotent
+        if isinstance(exc, httpx.TimeoutException):
+            return is_idempotent
+        return False
+
+    def _is_idempotent(self, method: str, path: str) -> bool:
+        return method.upper() in {"GET", "HEAD", "OPTIONS"} or path in self.IDEMPOTENT_PATHS
+
+    def _retry_delay(self, attempt: int) -> float:
+        base = 0.25
+        return base * (2 ** (attempt - 1))
 
     def _request(
         self,
