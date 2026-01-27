@@ -135,6 +135,18 @@ async def iiko_webhook(
             earn_points=earn_points,
             push_only_notification=True,
         )
+
+        if transaction is None:
+            logger.info(
+                "Webhook produced no cashback transaction (type=%s)",
+                payload.transactionType.value,
+            )
+            return {
+                "status": "ignored",
+                "transactionType": payload.transactionType.value,
+                "reason": "no cashback change",
+            }
+
         logger.info(
             "Recorded cashback change id=%s user=%s type=%s delta=%s",
             transaction.id,

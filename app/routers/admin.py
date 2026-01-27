@@ -67,3 +67,38 @@ def sync_users_with_iiko(
         offset += batch_size
 
     return {"synced": synced, "failed": failed, "failed_count": len(failed)}
+
+
+@router.post("/sync/users/{user_id}")
+def sync_single_user_with_iiko(
+    user_id: int,
+    manager: Staff = Depends(get_current_manager),
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    Sync exactly one user with iiko: fetch info, or create if missing, then resync.
+    Useful for manual recovery when only one user's data is out of sync.
+    """
+    user = (
+        db.query(User)
+        .filter(User.id == user_id, User.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if not user:
+        return {"success": False, "error": "User not found or deleted"}
+
+    service = AuthService(db)
+    try:
+        service.sync_user_from_iiko(user, create_if_missing=True)
+        db.commit()
+    except Exception as exc:  # pragma: no cover - admin maintenance endpoint
+        db.rollback()
+        return {"success": False, "error": str(exc)}
+
+    return {
+        "success": True,
+        "user_id": user.id,
+        "phone": user.phone,
+        "iiko_customer_id": user.iiko_customer_id,
+        "iiko_wallet_id": user.iiko_wallet_id,
+    }

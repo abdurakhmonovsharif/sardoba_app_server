@@ -12,6 +12,7 @@ from app.core.storage import extract_profile_photo_name, profile_photo_path
 from app.models import Staff, StaffRole, User
 from app.schemas import (
     AdminUserUpdate,
+    CardRead,
     CashbackRead,
     LoyaltySummary,
     UserDetail,
@@ -35,7 +36,11 @@ def list_users(
     staff: Staff = Depends(get_current_staff),
     db: Session = Depends(get_db),
 ) -> UserListResponse:
-    query = db.query(User).filter(User.is_deleted == False)  # noqa: E712
+    query = (
+        db.query(User)
+        .options(selectinload(User.cards))
+        .filter(User.is_deleted == False)  # noqa: E712
+    )
 
     if staff.role == StaffRole.MANAGER:
         target_waiter = waiter
@@ -65,6 +70,10 @@ def list_users(
     user_items: list[UserRead] = []
     for user in users:
         user_payload = UserRead.from_orm(user)
+        # Attach all cards for admin/manager; waiters see the same since balance is already masked
+        user_payload = user_payload.copy(
+            update={"cards": [CardRead.from_orm(card) for card in user.cards]}
+        )
         if is_waiter_request:
             # Hide actual cashback balance for waiters by always returning zero.
             user_payload = user_payload.copy(update={"cashback_balance": zero_balance})
@@ -83,7 +92,7 @@ def get_user_by_id(
 ) -> UserDetail:
     user = (
         db.query(User)
-        .options(selectinload(User.waiter))
+        .options(selectinload(User.waiter), selectinload(User.cards))
         .filter(
             User.id == user_id,
             User.is_deleted == False,  # noqa: E712
@@ -99,7 +108,9 @@ def get_user_by_id(
     transactions = cashback_service.get_user_cashbacks(user_id=user.id)
     loyalty = cashback_service.loyalty_summary(user=user)
 
-    user_payload = UserRead.from_orm(user)
+    user_payload = UserRead.from_orm(user).copy(
+        update={"cards": [CardRead.from_orm(card) for card in user.cards]}
+    )
     return UserDetail(
         **user_payload.dict(by_alias=True),
         loyalty=LoyaltySummary(**loyalty),

@@ -6,6 +6,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, validator
 
+from .card import CardRead
+
 from .auth import StaffRead
 from .cashback import CashbackRead, LoyaltySummary
 from .common import Pagination
@@ -25,6 +27,7 @@ class UserRead(BaseModel):
     middle_name: Optional[str] = Field(default=None, alias="middleName")
     is_deleted: bool
     giftget: bool
+    cards: Optional[list[CardRead]] = None
     created_at: datetime
     updated_at: datetime
 
