@@ -1,8 +1,9 @@
 from decimal import Decimal
 
 from app.core.security import create_password_hash
-from app.models import Staff, StaffRole, User
+from app.models import Staff, StaffRole, User, CashbackSource
 from app.models.enums import SardobaBranch
+from app.schemas.iiko import IikoTransactionType
 
 
 def _create_manager(session, phone="+998900000002"):
@@ -183,17 +184,41 @@ def test_cashback_use_succeeds(client, session_factory):
     assert resp_data["message"]["uz"] == "Keshbek bilan to'lovga ruxsat beriladi."
 
 
-def test_manual_35k_cashback_sets_gift_flag(client, session_factory):
+def test_gift_flag_sets_on_first_minus_35k(session_factory):
+    session = session_factory()
+    user = _create_user(session, phone="+998901234572")
+    # give user initial balance to allow deduction
+    user.cashback_balance = Decimal("60000")
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    from app.services.cashback_service import CashbackService, GIFT_REFILL_AMOUNT
+
+    service = CashbackService(session)
+    service.adjust_cashback_balance(
+        user=user,
+        amount=-GIFT_REFILL_AMOUNT,
+        branch_id=None,
+        source=CashbackSource.MANUAL,
+        staff_id=None,
+        transaction_type=IikoTransactionType.PAY_FROM_WALLET,
+    )
+
+    session.refresh(user)
+    assert user.giftget is True
+
+
+def test_positive_35k_does_not_set_gift_flag(client, session_factory):
     session = session_factory()
     manager = _create_manager(session, phone="+998900000006")
-    user = _create_user(session, phone="+998901234572")
+    user = _create_user(session, phone="+998901234573")
     session.close()
 
     login_resp = client.post(
         "/api/v1/auth/staff/login",
         json={"phone": manager.phone, "password": "secret123"},
     )
-    assert login_resp.status_code == 200
     token = login_resp.json()["tokens"]["access_token"]
 
     add_resp = client.post(
@@ -210,5 +235,5 @@ def test_manual_35k_cashback_sets_gift_flag(client, session_factory):
 
     session = session_factory()
     user_db = session.query(User).filter(User.id == user.id).one()
-    assert user_db.giftget is True
+    assert user_db.giftget is False
     session.close()

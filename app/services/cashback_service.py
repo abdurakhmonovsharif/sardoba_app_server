@@ -148,7 +148,12 @@ class CashbackService:
             self.db.add(cashback)
             self.db.flush()
 
-            if transaction_type == IikoTransactionType.WELCOMEBONUS and not user.giftget:
+            if (
+                amount is not None
+                and amount == -GIFT_REFILL_AMOUNT
+                and not user.giftget
+            ):
+                # Mark gift redeemed only on the first 35k deduction.
                 user.giftget = True
                 self.db.add(user)
 
