@@ -25,50 +25,6 @@ def list_auth_logs(
     }
 
 
-@router.post("/sync/users")
-def sync_users_with_iiko(
-    manager: Staff = Depends(get_current_manager),
-    db: Session = Depends(get_db),
-    batch_size: int = Query(default=500, ge=1, le=5_000),
-) -> dict:
-    """
-    Sync all active users with iiko `/customer/info`.
-    Intended for admin panel trigger or periodic calls (e.g., every 10 minutes).
-    """
-    service = AuthService(db)
-    synced = 0
-    failed: list[dict] = []
-
-    # Process users in batches to keep memory bounded.
-    offset = 0
-    while True:
-        users = (
-            db.query(User)
-            .filter(User.is_deleted == False)  # noqa: E712
-            .order_by(User.id)
-            .offset(offset)
-            .limit(batch_size)
-            .all()
-        )
-        if not users:
-            break
-
-        for user in users:
-            try:
-                service.sync_user_from_iiko(user, create_if_missing=True)
-                db.flush()
-                synced += 1
-            except Exception as exc:  # pragma: no cover - admin maintenance endpoint
-                db.rollback()
-                failed.append({"user_id": user.id, "phone": user.phone, "error": str(exc)})
-                continue
-
-        db.commit()
-        offset += batch_size
-
-    return {"synced": synced, "failed": failed, "failed_count": len(failed)}
-
-
 @router.post("/sync/users/{user_id}")
 def sync_single_user_with_iiko(
     user_id: int,
