@@ -8,6 +8,33 @@ from .config import BASE_DIR, get_settings
 from .observability import get_correlation_id
 
 
+# Reserved LogRecord attributes that should not be duplicated in the JSON payload.
+_RESERVED_LOG_KEYS = {
+    "name",
+    "msg",
+    "args",
+    "levelname",
+    "levelno",
+    "pathname",
+    "filename",
+    "module",
+    "exc_info",
+    "exc_text",
+    "stack_info",
+    "lineno",
+    "funcName",
+    "created",
+    "msecs",
+    "relativeCreated",
+    "thread",
+    "threadName",
+    "processName",
+    "process",
+    "message",
+    "asctime",
+}
+
+
 class CorrelationIdFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - simple enrichment
         record.correlation_id = get_correlation_id() or "-"
@@ -25,6 +52,14 @@ class JsonFormatter(logging.Formatter):
             "correlation_id": getattr(record, "correlation_id", "-"),
             "message": record.getMessage(),
         }
+        for key, value in record.__dict__.items():
+            if key in _RESERVED_LOG_KEYS or key in payload:
+                continue
+            try:
+                json.dumps({key: value})
+                payload[key] = value
+            except TypeError:
+                payload[key] = str(value)
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)

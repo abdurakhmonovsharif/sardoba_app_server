@@ -1,0 +1,13 @@
+name = "iiko-proxy"
+main = "src/index.js"
+compatibility_date = "2026-01-28"
+workers_dev = true
+
+[vars]
+# Set via `wrangler secret put PROXY_SECRET`
+PROXY_SECRET = "set-in-environment"
+
+[durable_objects]
+bindings = [
+  { name = "IIKO_QUEUE", class_name = "IikoQueue" }
+]

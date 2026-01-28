@@ -167,6 +167,7 @@ class IikoService:
     ) -> httpx.Response:
         attempts = 2  # 1 initial + 1 retry
         is_idempotent = self._is_idempotent(method, path)
+        full_url = str(self._client.base_url.join(path))
         last_exc: httpx.RequestError | None = None
 
         for attempt in range(1, attempts + 1):
@@ -177,6 +178,7 @@ class IikoService:
                 extra={
                     "method": method,
                     "path": path,
+                    "url": full_url,
                     "attempt": attempt,
                     "attempts": attempts,
                 },
@@ -195,6 +197,7 @@ class IikoService:
                     extra={
                         "method": method,
                         "path": path,
+                        "url": full_url,
                         "attempt": attempt,
                         "elapsed_ms": round(elapsed_ms, 1),
                         "status_code": response.status_code,
@@ -221,6 +224,7 @@ class IikoService:
                         "write": timeouts.write,
                         "pool": timeouts.pool,
                         "will_retry": should_retry and attempt < attempts,
+                        "url": full_url,
                     },
                     exc_info=False,
                 )

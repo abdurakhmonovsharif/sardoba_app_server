@@ -52,6 +52,7 @@ class Settings(BaseSettings):
         env="IIKO_API_BASE_URL",
     )
     IIKO_API_LOGIN: str = Field(..., env="IIKO_API_LOGIN")
+    IIKO_PROXY_SECRET: str = Field(..., env="IIKO_PROXY_SECRET")
     IIKO_ORGANIZATION_ID: str = Field(..., env="IIKO_ORGANIZATION_ID")
 
     CORS_ORIGINS: list[AnyHttpUrl] | list[str] = Field(default_factory=list)
@@ -83,7 +84,7 @@ class Settings(BaseSettings):
 
         @classmethod
         def parse_env_var(cls, field_name: str, raw_value: str):
-            if field_name == "OTP_RATE_LIMIT_BYPASS_PHONES":
+            if field_name == "OTP_RATE_LIMIT_BYPASS_PHONES":    
                 # Let validator handle comma-separated strings instead of forcing JSON.
                 return raw_value
             return super().parse_env_var(field_name, raw_value)

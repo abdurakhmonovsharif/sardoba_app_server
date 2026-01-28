@@ -118,12 +118,9 @@ class AuthService:
         if normalized_purpose == "register":
             if active_user_exists:
                 raise exceptions.ConflictError("Bu telefon raqamda foydalanuvchu mavjud.")
-            self._find_or_create_user_from_iiko(phone)
         else:
             if not active_user_exists:
-                synced_user = self._ensure_user_for_login(phone)
-                if not synced_user:
-                    raise exceptions.NotFoundError("Bu raqam orqali foydalanuvchi yo'q, iltimos akkaunt yaratishni bosing.")
+                raise exceptions.NotFoundError("Bu raqam orqali foydalanuvchi yo'q, iltimos akkaunt yaratishni bosing.")
         otp = self.otp_service.request_otp(phone=phone, purpose=purpose, ip=ip, user_agent=user_agent)
         log_auth_event(
             db=self.db,
@@ -169,46 +166,46 @@ class AuthService:
                 raise exceptions.NotFoundError("Invalid waiter referral code")
 
         normalized_purpose = (purpose or "").lower()
-        user = self._find_active_user_by_phone(phone)
-        iiko_customer = self._fetch_iiko_customer(phone)
-        iiko_customer = self._reactivate_iiko_customer_if_deleted(phone, iiko_customer)
+        is_register = normalized_purpose == "register"
+        user = self.db.query(User).filter(User.phone == phone).first()
 
-        if user:
+        if user and user.is_deleted:
+            user.is_deleted = False
+            user.deleted_at = None
+            self.db.add(user)
+
+        if user and not user.is_deleted:
             self._update_user_profile(user, name, date_of_birth, waiter)
-            if iiko_customer:
-                self._sync_user_with_iiko(user, iiko_customer)
-                self._ensure_card_exists(user)
-            elif not user.iiko_customer_id:
-                self._ensure_iiko_customer_safe(user, name=name, date_of_birth=date_of_birth)
         else:
-            if normalized_purpose != "register":
+            if not is_register:
                 raise exceptions.NotFoundError(
                     "Bu raqam orqali foydalanuvchi topilmadi, iltimos akkaunt yaratishni bosing."
                 )
-            user = self._find_or_create_user_from_iiko(phone)
-            if not user:
-                user = User(phone=phone, name=name, date_of_birth=date_of_birth)
-                if waiter:
-                    user.waiter = waiter
-                self.db.add(user)
-                self.db.flush()
-            elif user.deleted:
-                user.deleted = False
-                user.deleted_at = None
-                self.db.add(user)
+            user = user or User(phone=phone, name=name, date_of_birth=date_of_birth)
+            if waiter:
+                user.waiter = waiter
+            self.db.add(user)
+            self.db.flush()
             self._update_user_profile(user, name, date_of_birth, waiter)
-            if iiko_customer:
-                self._sync_user_with_iiko(user, iiko_customer)
-                self._ensure_card_exists(user)
-            elif not user.iiko_customer_id:
-                self._ensure_iiko_customer_safe(user, name=name, date_of_birth=date_of_birth)
 
         self.db.flush()
-        self.profile_sync_service.flush_pending_updates(user)
+
+        if is_register:
+            result = self.sync_user_from_iiko(user, create_if_missing=True, admin_sync=True)
+            if not result.ok:
+                self.db.rollback()
+                raise exceptions.ServiceError(
+                    f"Iiko sync failed during registration: {result.error or 'unknown_error'}"
+                )
+        else:
+            if not user.iiko_customer_id:
+                self.db.rollback()
+                raise exceptions.ConflictError(
+                    "Profilingiz iiko bilan bog'lanmagan. Iltimos qayta ro'yxatdan o'ting yoki qo'llab-quvvatlashga murojaat qiling."
+                )
 
         tokens = self.issue_tokens(actor_type=AuthActorType.CLIENT, subject_id=user.id)
 
-        self.sync_user_from_iiko(user)
         log_auth_event(
             db=self.db,
             actor_type=AuthActorType.CLIENT,
@@ -219,6 +216,11 @@ class AuthService:
             user_agent=user_agent,
             meta={"purpose": purpose, "otp_id": otp.id},
         )
+
+        # Flush pending profile updates only when we already have a linked iiko customer to avoid background creation.
+        if user.iiko_customer_id and self.profile_sync_service:
+            self.profile_sync_service.flush_pending_updates(user)
+
         self.db.commit()
         self.db.refresh(user)
         return user, tokens

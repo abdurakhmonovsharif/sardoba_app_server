@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Query, status
 from sqlalchemy.orm import Session
 
-from app.core.cache import cache_manager
+from app.core.cache import RedisCacheBackend, cache_manager
 from app.core.dependencies import (
     get_current_manager,
     get_current_staff,
@@ -14,6 +14,7 @@ from app.core.dependencies import (
 )
 from app.core.db import session_scope
 from app.core.localization import localize_message
+from app.core.locking import make_lock
 from app.models import AuthActorType, Card, Staff, User
 from app.schemas import (
     CashbackRead,
@@ -37,6 +38,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
 _FALLBACK_DEMO_PHONE = "+998911111111"
 _SYNC_RATE_LIMIT_SECONDS = 300  # 5 minutes
+_GLOBAL_SYNC_LOCK_KEY = "iiko:sync:global"
+_GLOBAL_SYNC_LOCK_TTL_SECONDS = 30
 
 
 @router.post("/client/request-otp", status_code=status.HTTP_204_NO_CONTENT)
@@ -70,6 +73,7 @@ def request_client_otp(
 def verify_client_otp(
     payload: ClientOTPVerify,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> dict:
     service = AuthService(db)
@@ -89,10 +93,19 @@ def verify_client_otp(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=localize_message(str(exc))) from exc
     except service_exceptions.ExternalServiceBadRequest as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=localize_message(str(exc))) from exc
+    except service_exceptions.ConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=localize_message(str(exc))) from exc
     except service_exceptions.NotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=localize_message(str(exc))) from exc
+    except service_exceptions.ServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=localize_message(str(exc))) from exc
 
     token_payload = TokenResponse(access_token=tokens["access"], refresh_token=tokens["refresh"])
+    if not user.is_deleted and user.iiko_customer_id and not _should_rate_limit_sync(user.id):
+        try:
+            background_tasks.add_task(_sync_user_from_iiko_background, user.id)
+        except Exception:
+            logger.exception("Failed to schedule background sync for user %s", user.id)
     return {"tokens": token_payload}
 
 
@@ -197,41 +210,62 @@ def refresh_tokens(payload: RefreshRequest, db: Session = Depends(get_db)) -> To
 
 
 def _sync_user_from_iiko_background(user_id: int) -> None:
-    with session_scope() as session:
-        user = session.query(User).filter(User.id == user_id).first()
-        if not user or user.is_deleted:
+    backend = cache_manager.get_backend()
+    if not isinstance(backend, RedisCacheBackend) or backend.client is None:
+        logger.info("background_sync_skipped_no_redis", extra={"user_id": user_id})
+        return
+
+    redis_client = backend.client
+    global_lock = make_lock(
+        _GLOBAL_SYNC_LOCK_KEY,
+        redis_client=redis_client,
+        ttl_seconds=_GLOBAL_SYNC_LOCK_TTL_SECONDS,
+        wait_timeout=2,
+        retry_interval=0.05,
+        log=logger,
+    )
+
+    with global_lock.hold() as acquired:
+        if not acquired:
+            logger.info("background_sync_skipped_lock_busy", extra={"user_id": user_id})
             return
-        try:
-            result = AuthService(session).sync_user_from_iiko(user, create_if_missing=True)
-            if result.ok:
-                session.commit()
-            else:
+        with session_scope() as session:
+            user = session.query(User).filter(User.id == user_id).first()
+            if not user or user.is_deleted or not user.iiko_customer_id:
+                return
+            try:
+                result = AuthService(session).sync_user_from_iiko(user, create_if_missing=False)
+                if result.ok:
+                    session.commit()
+                else:
+                    session.rollback()
+                    logger.info(
+                        "background_sync_skipped_or_failed",
+                        extra={
+                            "user_id": user.id,
+                            "correlation_id": result.correlation_id,
+                            "error": result.error,
+                            "operations": result.operations,
+                        },
+                    )
+            except Exception:
                 session.rollback()
-                logger.info(
-                    "background_sync_skipped_or_failed",
-                    extra={
-                        "user_id": user.id,
-                        "correlation_id": result.correlation_id,
-                        "error": result.error,
-                        "operations": result.operations,
-                    },
-                )
-        except Exception:
-            session.rollback()
-            logger.exception("Background Iiko sync failed for user %s", user_id)
+                logger.exception("Background Iiko sync failed for user %s", user_id)
 
 
 def _should_rate_limit_sync(user_id: int) -> bool:
     backend = cache_manager.get_backend()
+    if not isinstance(backend, RedisCacheBackend) or backend.client is None:
+        logger.info("skip_sync_no_redis", extra={"user_id": user_id})
+        return True
+
     key = f"iiko:sync:last:{user_id}"
-    if backend.get(key):
-        return True
     try:
-        backend.set(key, "1", _SYNC_RATE_LIMIT_SECONDS)
+        allowed = backend.client.set(key, "1", nx=True, ex=_SYNC_RATE_LIMIT_SECONDS)
+        return not bool(allowed)
     except Exception:
-        # If cache backend is unavailable, err on the side of skipping sync to stay safe.
+        logger.warning("skip_sync_redis_error", extra={"user_id": user_id})
         return True
-    return False
 
 
 @router.get("/me")
@@ -286,7 +320,7 @@ def read_profile(
         loyalty = cashback_service.loyalty_summary(user=user)
 
         # Fire-and-forget optional sync after response; never block GET latency.
-        if not user.is_deleted and not _should_rate_limit_sync(user.id):
+        if not user.is_deleted and user.iiko_customer_id and not _should_rate_limit_sync(user.id):
             try:
                 background_tasks.add_task(_sync_user_from_iiko_background, user.id)
             except Exception:
@@ -320,4 +354,3 @@ def read_profile(
         return payload
 
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=localize_message("Unknown actor type"))
-
