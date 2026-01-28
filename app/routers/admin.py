@@ -45,14 +45,21 @@ def sync_single_user_with_iiko(
 
     service = AuthService(db)
     try:
-        service.sync_user_from_iiko(user, create_if_missing=True)
-        db.commit()
+        result = service.sync_user_from_iiko(user, create_if_missing=True, admin_sync=True)
+        if result.ok:
+            db.commit()
+        else:
+            db.rollback()
     except Exception as exc:  # pragma: no cover - admin maintenance endpoint
         db.rollback()
         return {"success": False, "error": str(exc)}
 
     return {
-        "success": True,
+        "success": result.ok,
+        "updated": result.updated,
+        "changed_fields": sorted(result.changed_fields) if hasattr(result, "changed_fields") else [],
+        "warnings": getattr(result, "warnings", []),
+        "error": result.error,
         "user_id": user.id,
         "phone": user.phone,
         "iiko_customer_id": user.iiko_customer_id,
