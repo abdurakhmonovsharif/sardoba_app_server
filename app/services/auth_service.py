@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 import time
+import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
 import httpx
@@ -7,6 +8,10 @@ import logging
 import secrets
 import string
 from typing import Any
+
+from app.core.cache import RedisCacheBackend, cache_manager
+from app.core.locking import make_lock
+from app.core.observability import correlation_context
 
 from jwt import InvalidTokenError
 from sqlalchemy import func
@@ -52,6 +57,8 @@ class SyncResult:
     changed_fields: set[str] = field(default_factory=set)
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
+    correlation_id: str | None = None
+    operations: list[dict[str, Any]] = field(default_factory=list)
 
     def fail(self, reason: str) -> "SyncResult":
         self.ok = False
@@ -65,6 +72,12 @@ class SyncResult:
     def add_warning(self, message: str) -> None:
         self.warnings.append(message)
 
+    def add_operation(self, name: str, status: str, reason: str | None = None) -> None:
+        entry = {"operation": name, "status": status}
+        if reason:
+            entry["reason"] = reason
+        self.operations.append(entry)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
@@ -72,6 +85,8 @@ class SyncResult:
             "changed_fields": sorted(self.changed_fields),
             "warnings": self.warnings,
             "error": self.error,
+            "operations": self.operations,
+            "correlation_id": self.correlation_id,
         }
 
 
@@ -83,6 +98,8 @@ class AuthService:
         self.card_service = CardService(db)
         self.profile_sync_service = IikoProfileSyncService(db)
         self.iiko_service = IikoService()
+        self._cache_backend = cache_manager.get_backend()
+        self._redis_client = self._cache_backend.client if isinstance(self._cache_backend, RedisCacheBackend) else None
 
     def issue_tokens(self, *, actor_type: AuthActorType, subject_id: int, extra: dict | None = None) -> dict[str, str]:
         claims = extra.copy() if extra else {}
@@ -328,89 +345,159 @@ class AuthService:
         create_retry_delay: float = 1.0,
         admin_sync: bool = False,
     ) -> SyncResult:
-        result = SyncResult()
+        sync_corr = f"iiko-sync-{uuid.uuid4().hex[:12]}"
+        result = SyncResult(correlation_id=sync_corr)
 
-        if not user.phone:
-            logger.warning("Sync aborted: user %s missing phone", user.id)
-            return result.fail("missing_phone")
-        if user.is_deleted:
-            logger.warning("Sync aborted: user %s marked deleted", user.id)
-            return result.fail("user_deleted")
-
-        customer = self._fetch_iiko_customer(user.phone)
-        customer = self._reactivate_iiko_customer_if_deleted(user.phone, customer)
-
-        if not customer:
-            if not create_if_missing:
-                logger.warning("Iiko customer not found for %s", user.phone)
-                return result.fail("iiko_customer_not_found")
-            attempts = max(1, max_create_attempts)
-            for attempt in range(attempts):
-                created = self._ensure_iiko_customer_safe(
-                    user,
-                    name=user.name,
-                    date_of_birth=user.date_of_birth,
+        def _do_sync() -> SyncResult:
+            with correlation_context(sync_corr):
+                logger.info(
+                    "iiko_sync_start",
+                    extra={"user_id": user.id, "phone": user.phone, "admin_sync": admin_sync},
                 )
-                if created:
-                    customer = self._fetch_iiko_customer(user.phone) or created
+                result.add_operation("sync_start", "attempted")
+
+                if not user.phone:
+                    logger.warning("sync_abort_missing_phone", extra={"user_id": user.id})
+                    result.add_operation("validate_phone", "failed", "missing_phone")
+                    return result.fail("missing_phone")
+
+                if user.is_deleted:
+                    logger.warning("sync_abort_user_deleted", extra={"user_id": user.id})
+                    result.add_operation("validate_user", "failed", "user_deleted")
+                    return result.fail("user_deleted")
+
+                result.add_operation("fetch_customer", "attempted")
+                try:
+                    customer = self._fetch_iiko_customer(user.phone)
+                    customer = self._reactivate_iiko_customer_if_deleted(user.phone, customer)
+                except exceptions.ServiceError as exc:
+                    reason = "lock_contention" if "lock" in str(exc).lower() else "service_error"
+                    result.add_operation("fetch_customer", "failed", reason)
+                    logger.warning(
+                        "fetch_customer_failed",
+                        extra={"phone": user.phone, "error": str(exc)},
+                    )
+                    return result.fail(reason)
                 if customer:
-                    break
-                if attempt + 1 < attempts and create_retry_delay > 0:
-                    time.sleep(create_retry_delay)
-            if not customer:
-                logger.warning("Failed to create Iiko customer for %s after %s attempts", user.phone, attempts)
-                return result.fail("iiko_customer_create_failed")
+                    result.add_operation("fetch_customer", "success")
 
-        # Snapshot before syncing to report changes
-        previous_customer_id = user.iiko_customer_id
-        previous_wallet_id = user.iiko_wallet_id
-        previous_cashback = user.cashback_wallet.balance if user.cashback_wallet else None
+                if not customer:
+                    if not create_if_missing:
+                        logger.warning("iiko_customer_not_found", extra={"phone": user.phone})
+                        result.add_operation("fetch_customer", "failed", "not_found")
+                        return result.fail("iiko_customer_not_found")
+                    attempts = max(1, max_create_attempts)
+                    for attempt in range(attempts):
+                        result.add_operation("create_customer", "attempted", f"attempt_{attempt+1}")
+                        created = self._ensure_iiko_customer_safe(
+                            user,
+                            name=user.name,
+                            date_of_birth=user.date_of_birth,
+                        )
+                        if created:
+                            customer = self._fetch_iiko_customer(user.phone) or created
+                        if customer:
+                            result.add_operation("create_customer", "success", f"attempt_{attempt+1}")
+                            break
+                        if attempt + 1 < attempts and create_retry_delay > 0:
+                            time.sleep(create_retry_delay)
+                    if not customer:
+                        logger.warning(
+                            "iiko_customer_create_failed", extra={"phone": user.phone, "attempts": attempts}
+                        )
+                        result.add_operation("create_customer", "failed", "max_attempts_reached")
+                        return result.fail("iiko_customer_create_failed")
 
-        cashback_changed, cashback_issue = self._sync_user_with_iiko(user, customer, admin_sync=admin_sync)
+                # Snapshot before syncing to report changes
+                previous_customer_id = user.iiko_customer_id
+                previous_wallet_id = user.iiko_wallet_id
+                previous_cashback = user.cashback_wallet.balance if user.cashback_wallet else None
 
-        # In admin mode, try one more fetch if cashback couldn't be refreshed (iiko sometimes returns cached/partial wallets)
-        if admin_sync and cashback_issue:
-            refreshed_customer = self._fetch_iiko_customer(user.phone)
-            refreshed_customer = self._reactivate_iiko_customer_if_deleted(user.phone, refreshed_customer)
-            if refreshed_customer:
-                refreshed_wallets = refreshed_customer.get("walletBalances") or []
-                refreshed_wallet_id = self._extract_wallet_id(refreshed_customer)
-                if refreshed_wallet_id:
-                    self._assign_wallet_to_user(user, refreshed_wallet_id)
-                cashback_changed_retry, cashback_issue_retry = self._sync_cashback_from_wallets(
-                    user,
-                    refreshed_wallets,
-                    admin_sync=True,
-                )
-                if cashback_changed_retry:
-                    cashback_changed = True
-                    cashback_issue = None
+                result.add_operation("sync_wallets", "attempted")
+                cashback_changed, cashback_issue = self._sync_user_with_iiko(user, customer, admin_sync=admin_sync)
+
+                # In admin mode, try one more fetch if cashback couldn't be refreshed (iiko sometimes returns cached/partial wallets)
+                if admin_sync and cashback_issue:
+                    refreshed_customer = self._fetch_iiko_customer(user.phone)
+                    refreshed_customer = self._reactivate_iiko_customer_if_deleted(user.phone, refreshed_customer)
+                    if refreshed_customer:
+                        refreshed_wallets = refreshed_customer.get("walletBalances") or []
+                        refreshed_wallet_id = self._extract_wallet_id(refreshed_customer)
+                        if refreshed_wallet_id:
+                            self._assign_wallet_to_user(user, refreshed_wallet_id)
+                        cashback_changed_retry, cashback_issue_retry = self._sync_cashback_from_wallets(
+                            user,
+                            refreshed_wallets,
+                            admin_sync=True,
+                        )
+                        if cashback_changed_retry:
+                            cashback_changed = True
+                            cashback_issue = None
+                        else:
+                            cashback_issue = cashback_issue_retry or cashback_issue
+
+                if cashback_changed:
+                    result.add_change("cashback_balance")
+                    result.add_operation("sync_wallets", "success")
+                elif cashback_issue and admin_sync:
+                    result.add_operation("sync_wallets", "failed", cashback_issue)
+                    return result.fail(f"cashback_not_refreshed:{cashback_issue}")
+                elif cashback_issue:
+                    result.add_operation("sync_wallets", "warning", cashback_issue)
+                    result.add_warning(f"cashback_sync_issue:{cashback_issue}")
                 else:
-                    cashback_issue = cashback_issue_retry or cashback_issue
+                    result.add_operation("sync_wallets", "success")
 
-        if cashback_changed:
-            result.add_change("cashback_balance")
-        elif cashback_issue and admin_sync:
-            return result.fail(f"cashback_not_refreshed:{cashback_issue}")
-        elif cashback_issue:
-            result.add_warning(f"cashback_sync_issue:{cashback_issue}")
+                card_created = self._ensure_card_exists(user)
+                if card_created:
+                    result.add_change("card")
+                    result.add_operation("ensure_card", "success")
+                else:
+                    result.add_operation("ensure_card", "skipped", "exists")
 
-        card_created = self._ensure_card_exists(user)
-        if card_created:
-            result.add_change("card")
+                if user.iiko_wallet_id and user.iiko_wallet_id != previous_wallet_id:
+                    result.add_change("iiko_wallet_id")
+                if user.iiko_customer_id and user.iiko_customer_id != previous_customer_id:
+                    result.add_change("iiko_customer_id")
 
-        if user.iiko_wallet_id and user.iiko_wallet_id != previous_wallet_id:
-            result.add_change("iiko_wallet_id")
-        if user.iiko_customer_id and user.iiko_customer_id != previous_customer_id:
-            result.add_change("iiko_customer_id")
+                # Evaluate cashback change again if not captured due to missing walletBalances
+                if previous_cashback is not None and user.cashback_wallet:
+                    if user.cashback_wallet.balance != previous_cashback:
+                        result.add_change("cashback_balance")
 
-        # Evaluate cashback change again if not captured due to missing walletBalances
-        if previous_cashback is not None and user.cashback_wallet:
-            if user.cashback_wallet.balance != previous_cashback:
-                result.add_change("cashback_balance")
+                self.db.flush()
+                logger.info(
+                    "iiko_sync_complete",
+                    extra={
+                        "user_id": user.id,
+                        "phone": user.phone,
+                        "status": "SUCCESS" if result.ok else "FAILED",
+                        "updated": result.updated,
+                        "changed_fields": sorted(result.changed_fields),
+                    },
+                )
+                return result
 
-        self.db.flush()
-        return result
+        if admin_sync:
+            admin_lock = make_lock(
+                IikoService.ADMIN_LOCK_KEY,
+                redis_client=self._redis_client,
+                ttl_seconds=IikoService.ADMIN_LOCK_TTL_SECONDS,
+                wait_timeout=8,
+                retry_interval=0.1,
+                log=logger,
+            )
+            with admin_lock.hold() as acquired:
+                if not acquired:
+                    logger.warning(
+                        "admin_sync_skipped_due_to_lock", extra={"user_id": user.id, "phone": user.phone}
+                    )
+                    result.add_operation("admin_sync_lock", "failed", "lock_busy")
+                    return result.fail("admin_sync_lock_busy")
+                result.add_operation("admin_sync_lock", "acquired")
+                return _do_sync()
+
+        return _do_sync()
 
     def _assign_wallet_to_user(self, user: User, wallet_id: str) -> None:
         conflict = (

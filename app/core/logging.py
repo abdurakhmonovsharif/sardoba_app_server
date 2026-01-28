@@ -1,23 +1,79 @@
+import json
 import logging
-from pathlib import Path
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from .config import BASE_DIR, get_settings
+from .observability import get_correlation_id
 
 
-def configure_logging() -> None:
-    settings = get_settings()
+class CorrelationIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - simple enrichment
+        record.correlation_id = get_correlation_id() or "-"
+        record.service = "sardoba-app"
+        return True
 
-    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:  # pragma: no cover - formatting only
+        payload = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "service": getattr(record, "service", "sardoba-app"),
+            "logger": record.name,
+            "correlation_id": getattr(record, "correlation_id", "-"),
+            "message": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _build_handlers(settings) -> list[logging.Handler]:
+    handlers: list[logging.Handler] = []
+    formatter = JsonFormatter(datefmt="%Y-%m-%dT%H:%M:%S%z")
+    filter_ = CorrelationIdFilter()
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    stream_handler.addFilter(filter_)
+    handlers.append(stream_handler)
+
     if settings.LOG_FILE_PATH:
         log_path = Path(settings.LOG_FILE_PATH)
         if not log_path.is_absolute():
             log_path = BASE_DIR / log_path
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(formatter)
+        file_handler.addFilter(filter_)
+        handlers.append(file_handler)
+
+    return handlers
+
+
+def configure_logging() -> None:
+    """
+    Configure structured JSON logging with correlation id enrichment and
+    rotating file handlers that write to a host-mounted path.
+    """
+    settings = get_settings()
+    handlers = _build_handlers(settings)
 
     logging.basicConfig(
         level=settings.LOG_LEVEL,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
         handlers=handlers,
+        force=True,
     )
+
+    # Make httpx, sqlalchemy, and uvicorn less chatty while preserving warnings/errors.
+    logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)

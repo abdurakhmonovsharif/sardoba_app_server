@@ -44,7 +44,7 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = Field(default="INFO")
     ENVIRONMENT: str = Field(default="development")
-    LOG_FILE_PATH: str | None = Field(default="logs/app.log", env="LOG_FILE_PATH")
+    LOG_FILE_PATH: str | None = Field(default="/var/log/sardoba/iiko/app.log", env="LOG_FILE_PATH")
     SMS_DRY_RUN: bool = Field(default=False, env="SMS_DRY_RUN")
 
     IIKO_API_BASE_URL: str = Field(

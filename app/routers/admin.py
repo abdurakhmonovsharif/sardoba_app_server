@@ -60,6 +60,8 @@ def sync_single_user_with_iiko(
         "changed_fields": sorted(result.changed_fields) if hasattr(result, "changed_fields") else [],
         "warnings": getattr(result, "warnings", []),
         "error": result.error,
+        "correlation_id": getattr(result, "correlation_id", None),
+        "operations": getattr(result, "operations", []),
         "user_id": user.id,
         "phone": user.phone,
         "iiko_customer_id": user.iiko_customer_id,

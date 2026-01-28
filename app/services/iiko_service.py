@@ -3,12 +3,14 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Callable, Optional
 
 import httpx
 
 from app.core.cache import RedisCacheBackend, cache_manager
 from app.core.config import get_settings
+from app.core.locking import make_lock
+from app.core.observability import ensure_correlation_id, get_correlation_id
 
 from . import exceptions
 
@@ -18,12 +20,20 @@ logger = logging.getLogger("iiko.service")
 class IikoService:
     TOKEN_CACHE_KEY = "iiko:access_token"
     TOKEN_TTL_BUFFER_SECONDS = 30
-    CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
-    TOKEN_FETCH_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
+
+    # Aggressive throttling protections
+    CLIENT_TIMEOUT = httpx.Timeout(connect=2.0, read=8.0, write=2.0, pool=2.0)
+    TOKEN_FETCH_TIMEOUT = httpx.Timeout(connect=3.0, read=8.0, write=3.0, pool=3.0)
     TOKEN_LOCK_KEY = "iiko:access_token:lock"
     TOKEN_LOCK_TTL_SECONDS = 15
     TOKEN_LOCK_WAIT_SECONDS = 5
     TOKEN_LOCK_SLEEP_SECONDS = 0.05
+
+    USER_LOCK_TTL_SECONDS = 20
+    USER_LOCK_WAIT_SECONDS = 6
+    ADMIN_LOCK_KEY = "iiko:lock:admin_sync"
+    ADMIN_LOCK_TTL_SECONDS = 60
+
     IDEMPOTENT_PATHS = {
         "/api/1/access_token",
         "/api/1/loyalty/iiko/customer/info",  # iiko uses POST but it is a pure read
@@ -33,8 +43,9 @@ class IikoService:
         self.settings = get_settings()
         self._client = httpx.Client(base_url=self.settings.IIKO_API_BASE_URL, timeout=self.CLIENT_TIMEOUT)
         self._local_token_lock = threading.Lock()
-        # Detect backend once to decide lock strategy
         self._cache_backend = cache_manager.get_backend()
+        self._redis_client = self._cache_backend.client if isinstance(self._cache_backend, RedisCacheBackend) else None
+
         if self.settings.ENVIRONMENT.lower() == "production" and not isinstance(
             self._cache_backend, RedisCacheBackend
         ):
@@ -42,6 +53,8 @@ class IikoService:
                 "Redis cache backend is not configured in production; token cache will be per-process. "
                 "Set REDIS_URL to enable cluster-wide token sharing."
             )
+
+    # ---------------------- Token handling ---------------------- #
 
     def _cache_key(self) -> str:
         return self.TOKEN_CACHE_KEY
@@ -78,7 +91,6 @@ class IikoService:
         if isinstance(self._cache_backend, RedisCacheBackend):
             deadline = time.time() + self.TOKEN_LOCK_WAIT_SECONDS
             while time.time() < deadline:
-                # NX + EX acts as a lightweight distributed mutex
                 if self._cache_backend.client.set(
                     self.TOKEN_LOCK_KEY, lock_value, nx=True, ex=self.TOKEN_LOCK_TTL_SECONDS
                 ):
@@ -95,7 +107,6 @@ class IikoService:
                 return
             if isinstance(self._cache_backend, RedisCacheBackend):
                 try:
-                    # Release only if still owned by us (best-effort, non-atomic)
                     current = self._cache_backend.client.get(self.TOKEN_LOCK_KEY)
                     if current and current.decode("utf-8") == lock_value:
                         self._cache_backend.client.delete(self.TOKEN_LOCK_KEY)
@@ -127,7 +138,6 @@ class IikoService:
             if token:
                 return token
         with self._token_lock() as acquired:
-            # If we failed to obtain the lock, still attempt fetch but avoid double work if cache filled meanwhile
             if not force:
                 cached = self._get_cached_token()
                 if cached:
@@ -140,6 +150,8 @@ class IikoService:
         token = self._get_token(force=force_refresh)
         return {"Authorization": f"Bearer {token}"}
 
+    # ---------------------- Request layer ---------------------- #
+
     def _send_request(
         self,
         method: str,
@@ -149,38 +161,64 @@ class IikoService:
         headers: dict[str, str],
         timeout_override: httpx.Timeout | None = None,
     ) -> httpx.Response:
-        attempts = 3
+        attempts = 2  # 1 initial + 1 retry
         is_idempotent = self._is_idempotent(method, path)
         last_exc: httpx.RequestError | None = None
 
         for attempt in range(1, attempts + 1):
+            corr = get_correlation_id() or ensure_correlation_id("iiko")
             started = time.perf_counter()
+            logger.info(
+                "iiko_request_start",
+                extra={
+                    "method": method,
+                    "path": path,
+                    "attempt": attempt,
+                    "attempts": attempts,
+                },
+            )
             try:
-                return self._client.request(
+                response = self._client.request(
                     method,
                     path,
                     json=json,
                     headers=headers,
                     timeout=timeout_override or self._client.timeout,
                 )
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                logger.info(
+                    "iiko_request_success",
+                    extra={
+                        "method": method,
+                        "path": path,
+                        "attempt": attempt,
+                        "elapsed_ms": round(elapsed_ms, 1),
+                        "status_code": response.status_code,
+                    },
+                )
+                return response
             except httpx.RequestError as exc:
                 elapsed_ms = (time.perf_counter() - started) * 1000
                 stage = self._timeout_stage(exc)
                 should_retry = self._should_retry(exc, is_idempotent)
                 timeouts = timeout_override or self._client.timeout
                 logger.warning(
-                    "Iiko request %s %s failed at %s (%s) attempt %s/%s after %.0f ms | connect=%ss read=%ss write=%ss pool=%ss",
-                    method,
-                    path,
-                    stage,
-                    exc.__class__.__name__,
-                    attempt,
-                    attempts,
-                    elapsed_ms,
-                    timeouts.connect,
-                    timeouts.read,
-                    timeouts.write,
-                    timeouts.pool,
+                    "iiko_request_failed",
+                    extra={
+                        "method": method,
+                        "path": path,
+                        "stage": stage,
+                        "exception": exc.__class__.__name__,
+                        "attempt": attempt,
+                        "attempts": attempts,
+                        "elapsed_ms": round(elapsed_ms, 1),
+                        "connect": timeouts.connect,
+                        "read": timeouts.read,
+                        "write": timeouts.write,
+                        "pool": timeouts.pool,
+                        "will_retry": should_retry and attempt < attempts,
+                    },
+                    exc_info=False,
                 )
                 last_exc = exc
                 if not should_retry or attempt == attempts:
@@ -208,10 +246,8 @@ class IikoService:
         return "unknown"
 
     def _should_retry(self, exc: httpx.RequestError, is_idempotent: bool) -> bool:
-        # Transport-level issues (connect/pool) are always safe to retry.
         if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout)):
             return True
-        # Read timeout means the request reached server; retry only for idempotent operations.
         if isinstance(exc, httpx.ReadTimeout):
             return is_idempotent
         if isinstance(exc, httpx.TimeoutException):
@@ -222,53 +258,54 @@ class IikoService:
         return method.upper() in {"GET", "HEAD", "OPTIONS"} or path in self.IDEMPOTENT_PATHS
 
     def _retry_delay(self, attempt: int) -> float:
-        base = 0.25
+        base = 0.3
         return base * (2 ** (attempt - 1))
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        json: dict[str, Any] | None = None,
-        retry: bool = True,
-    ) -> dict[str, Any]:
-        headers = self._auth_headers()
-        logger.debug("Iiko request %s %s %s", method, path, json)
-        response = self._send_request(method, path, json=json, headers=headers)
-        if response.status_code in (401, 403) and retry:
-            headers = self._auth_headers(force_refresh=True)
-            response = self._send_request(method, path, json=json, headers=headers)
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.error(
-                "Iiko request %s %s failed (%s): %s",
-                method,
-                path,
-                exc.response.status_code,
-                exc.response.text,
-            )
-            raise
-        if not response.content:
-            return {}
-        payload = response.json()
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Iiko response %s %s -> %s", method, path, payload)
-        return payload
+    # ---------------------- User-scope locking ---------------------- #
+
+    def _user_lock_key(self, phone: Optional[str] = None, customer_id: Optional[str] = None) -> str:
+        if phone:
+            return f"iiko:lock:customer:{phone}"
+        if customer_id:
+            return f"iiko:lock:customer_id:{customer_id}"
+        return "iiko:lock:customer:unknown"
+
+    def _with_user_lock(self, lock_key: str, func: Callable[[], Any]) -> Any:
+        lock = make_lock(
+            lock_key,
+            redis_client=self._redis_client,
+            ttl_seconds=self.USER_LOCK_TTL_SECONDS,
+            wait_timeout=self.USER_LOCK_WAIT_SECONDS,
+            retry_interval=0.05,
+            log=logger,
+        )
+        with lock.hold() as acquired:
+            if not acquired:
+                raise exceptions.ServiceError("iiko user lock contention")
+            return func()
+
+    # ---------------------- Public API ---------------------- #
 
     def get_customer_by_phone(self, phone: str) -> dict[str, Any] | None:
+        corr = ensure_correlation_id("iiko-sync")
+        lock_key = self._user_lock_key(phone=phone)
         payload = {"organizationId": self.settings.IIKO_ORGANIZATION_ID, "phone": phone, "type": "phone"}
-        try:
-            return self._request("POST", "/api/1/loyalty/iiko/customer/info", json=payload)
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            if status in (404, 400):
-                logger.debug("Iiko customer lookup %s returned %s", phone, status)
-                return None
-            raise exceptions.ServiceError("Failed to fetch Iiko customer info") from exc
+
+        def _call():
+            try:
+                return self._request("POST", "/api/1/loyalty/iiko/customer/info", json=payload)
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in (404, 400):
+                    logger.debug("Iiko customer lookup %s returned %s", phone, status)
+                    return None
+                raise exceptions.ServiceError("Failed to fetch Iiko customer info") from exc
+
+        return self._with_user_lock(lock_key, _call)
 
     def create_or_update_customer(self, *, phone: str, payload_extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        corr = ensure_correlation_id("iiko-sync")
+        lock_key = self._user_lock_key(phone=phone)
         body: dict[str, Any] = {
             "organizationId": self.settings.IIKO_ORGANIZATION_ID,
             "phone": phone,
@@ -276,19 +313,29 @@ class IikoService:
         if payload_extra:
             body.update(payload_extra)
         body.setdefault("comment", "CASHBACK MOBILE APP CLIENT")
-        try:
-            return self._request("POST", "/api/1/loyalty/iiko/customer/create_or_update", json=body)
-        except httpx.HTTPStatusError as exc:
-            raise exceptions.ServiceError("Unable to create or update Iiko customer") from exc
+
+        def _call():
+            try:
+                return self._request("POST", "/api/1/loyalty/iiko/customer/create_or_update", json=body)
+            except httpx.HTTPStatusError as exc:
+                raise exceptions.ServiceError("Unable to create or update Iiko customer") from exc
+
+        return self._with_user_lock(lock_key, _call)
 
     def add_card(self, *, customer_id: str, card_number: str, card_track: str) -> dict[str, Any]:
+        corr = ensure_correlation_id("iiko-sync")
+        lock_key = self._user_lock_key(customer_id=customer_id)
         payload = {
             "organizationId": self.settings.IIKO_ORGANIZATION_ID,
             "customerId": customer_id,
             "cardTrack": card_track,
             "cardNumber": card_number,
         }
-        try:
-            return self._request("POST", "/api/1/loyalty/iiko/customer/card/add", json=payload)
-        except httpx.HTTPStatusError as exc:
-            raise exceptions.ServiceError("Unable to add card to Iiko customer") from exc
+
+        def _call():
+            try:
+                return self._request("POST", "/api/1/loyalty/iiko/customer/card/add", json=payload)
+            except httpx.HTTPStatusError as exc:
+                raise exceptions.ServiceError("Unable to add card to Iiko customer") from exc
+
+        return self._with_user_lock(lock_key, _call)

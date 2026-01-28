@@ -5,13 +5,14 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Query, status
 from sqlalchemy.orm import Session
 
-from app.core.db import session_scope
+from app.core.cache import cache_manager
 from app.core.dependencies import (
     get_current_manager,
     get_current_staff,
     get_db,
     get_token_payload,
 )
+from app.core.db import session_scope
 from app.core.localization import localize_message
 from app.models import AuthActorType, Card, Staff, User
 from app.schemas import (
@@ -33,19 +34,9 @@ from app.services import exceptions as service_exceptions
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-_FALLBACK_DEMO_PHONE = "+998911111111"
 logger = logging.getLogger(__name__)
-
-
-def _sync_user_from_iiko_background(user_id: int) -> None:
-    with session_scope() as session:
-        user = session.query(User).filter(User.id == user_id).first()
-        if not user:
-            return
-        try:
-            AuthService(session).sync_user_from_iiko(user, create_if_missing=True)
-        except Exception:
-            logger.exception("Background Iiko sync failed for user %s", user_id)
+_FALLBACK_DEMO_PHONE = "+998911111111"
+_SYNC_RATE_LIMIT_SECONDS = 300  # 5 minutes
 
 
 @router.post("/client/request-otp", status_code=status.HTTP_204_NO_CONTENT)
@@ -205,6 +196,44 @@ def refresh_tokens(payload: RefreshRequest, db: Session = Depends(get_db)) -> To
     return TokenResponse(access_token=tokens["access"], refresh_token=tokens["refresh"])
 
 
+def _sync_user_from_iiko_background(user_id: int) -> None:
+    with session_scope() as session:
+        user = session.query(User).filter(User.id == user_id).first()
+        if not user or user.is_deleted:
+            return
+        try:
+            result = AuthService(session).sync_user_from_iiko(user, create_if_missing=True)
+            if result.ok:
+                session.commit()
+            else:
+                session.rollback()
+                logger.info(
+                    "background_sync_skipped_or_failed",
+                    extra={
+                        "user_id": user.id,
+                        "correlation_id": result.correlation_id,
+                        "error": result.error,
+                        "operations": result.operations,
+                    },
+                )
+        except Exception:
+            session.rollback()
+            logger.exception("Background Iiko sync failed for user %s", user_id)
+
+
+def _should_rate_limit_sync(user_id: int) -> bool:
+    backend = cache_manager.get_backend()
+    key = f"iiko:sync:last:{user_id}"
+    if backend.get(key):
+        return True
+    try:
+        backend.set(key, "1", _SYNC_RATE_LIMIT_SECONDS)
+    except Exception:
+        # If cache backend is unavailable, err on the side of skipping sync to stay safe.
+        return True
+    return False
+
+
 @router.get("/me")
 def read_profile(
     background_tasks: BackgroundTasks,
@@ -252,10 +281,17 @@ def read_profile(
         user = db.query(User).filter(User.id == subject).first()
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=localize_message("User not found"))
-        background_tasks.add_task(_sync_user_from_iiko_background, user.id)
         cashback_service = CashbackService(db)
         transactions = cashback_service.get_user_cashbacks(user_id=user.id, limit=cashback_limit)
         loyalty = cashback_service.loyalty_summary(user=user)
+
+        # Fire-and-forget optional sync after response; never block GET latency.
+        if not user.is_deleted and not _should_rate_limit_sync(user.id):
+            try:
+                background_tasks.add_task(_sync_user_from_iiko_background, user.id)
+            except Exception:
+                logger.exception("Failed to schedule background sync for user %s", user.id)
+
         return {
             "type": AuthActorType.CLIENT.value,
             "profile": UserRead.from_orm(user),
@@ -284,3 +320,4 @@ def read_profile(
         return payload
 
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=localize_message("Unknown actor type"))
+
