@@ -120,7 +120,10 @@ class IikoService:
             "POST",
             "/api/1/access_token",
             json={"apiLogin": self.settings.IIKO_API_LOGIN},
-            headers={},
+           headers={
+            "x-iiko-proxy-secret": self.settings.IIKO_PROXY_SECRET,
+            "Content-Type": "application/json",
+        },
             timeout_override=self.TOKEN_FETCH_TIMEOUT,
         )
         response.raise_for_status()
