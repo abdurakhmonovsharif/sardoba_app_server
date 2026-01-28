@@ -261,6 +261,45 @@ class IikoService:
         base = 0.3
         return base * (2 ** (attempt - 1))
 
+    # ---------------------- High-level request wrapper ---------------------- #
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        retry: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Authenticates, sends, optionally retries on 401/403 with refreshed token,
+        and returns parsed JSON (or {} if empty).
+        """
+        headers = self._auth_headers()
+        response = self._send_request(method, path, json=json, headers=headers)
+        if response.status_code in (401, 403) and retry:
+            headers = self._auth_headers(force_refresh=True)
+            response = self._send_request(method, path, json=json, headers=headers)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "iiko_request_http_error",
+                extra={
+                    "method": method,
+                    "path": path,
+                    "status_code": exc.response.status_code,
+                    "body": exc.response.text[:5000],
+                },
+            )
+            raise
+        if not response.content:
+            return {}
+        payload = response.json()
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("iiko_response", extra={"method": method, "path": path, "payload": payload})
+        return payload
+
     # ---------------------- User-scope locking ---------------------- #
 
     def _user_lock_key(self, phone: Optional[str] = None, customer_id: Optional[str] = None) -> str:
