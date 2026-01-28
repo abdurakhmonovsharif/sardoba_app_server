@@ -148,7 +148,11 @@ class IikoService:
 
     def _auth_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
         token = self._get_token(force=force_refresh)
-        return {"Authorization": f"Bearer {token}"}
+        return {
+        "Authorization": f"Bearer {token}",
+        "x-iiko-proxy-secret": self.settings.IIKO_PROXY_SECRET,
+        "Content-Type": "application/json",
+    }
 
     # ---------------------- Request layer ---------------------- #
 
