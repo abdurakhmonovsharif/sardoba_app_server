@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.cache import RedisCacheBackend, cache_manager
@@ -12,9 +12,7 @@ from app.core.dependencies import (
     get_db,
     get_token_payload,
 )
-from app.core.db import session_scope
 from app.core.localization import localize_message
-from app.core.locking import make_lock
 from app.models import AuthActorType, Card, Staff, User
 from app.schemas import (
     CashbackRead,
@@ -30,7 +28,7 @@ from app.schemas import (
     TokenResponse,
     UserRead,
 )
-from app.services import AuthService, CashbackService, StaffService
+from app.services import AuthService, CashbackService, IikoSyncJobService, StaffService
 from app.services import exceptions as service_exceptions
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -38,8 +36,6 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 logger = logging.getLogger(__name__)
 _FALLBACK_DEMO_PHONE = "+998911111111"
 _SYNC_RATE_LIMIT_SECONDS = 300  # 5 minutes
-_GLOBAL_SYNC_LOCK_KEY = "iiko:sync:global"
-_GLOBAL_SYNC_LOCK_TTL_SECONDS = 30
 
 
 @router.post("/client/request-otp", status_code=status.HTTP_204_NO_CONTENT)
@@ -73,11 +69,9 @@ def request_client_otp(
 def verify_client_otp(
     payload: ClientOTPVerify,
     request: Request,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> dict:
     service = AuthService(db)
-    print(f"Received verify_client_otp request with payload: {payload.dict()}")
     try:
         user, tokens = service.verify_client_otp(
             phone=payload.phone,
@@ -100,12 +94,15 @@ def verify_client_otp(
     except service_exceptions.ServiceError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=localize_message(str(exc))) from exc
 
+    _enqueue_user_sync_job(
+        db,
+        user_id=user.id,
+        phone=user.phone,
+        create_if_missing=True,
+        source="auth_verify_otp",
+    )
+
     token_payload = TokenResponse(access_token=tokens["access"], refresh_token=tokens["refresh"])
-    if not user.is_deleted and user.iiko_customer_id and not _should_rate_limit_sync(user.id):
-        try:
-            background_tasks.add_task(_sync_user_from_iiko_background, user.id)
-        except Exception:
-            logger.exception("Failed to schedule background sync for user %s", user.id)
     return {"tokens": token_payload}
 
 
@@ -209,48 +206,24 @@ def refresh_tokens(payload: RefreshRequest, db: Session = Depends(get_db)) -> To
     return TokenResponse(access_token=tokens["access"], refresh_token=tokens["refresh"])
 
 
-def _sync_user_from_iiko_background(user_id: int) -> None:
-    backend = cache_manager.get_backend()
-    if not isinstance(backend, RedisCacheBackend) or backend.client is None:
-        logger.info("background_sync_skipped_no_redis", extra={"user_id": user_id})
-        return
-
-    redis_client = backend.client
-    global_lock = make_lock(
-        _GLOBAL_SYNC_LOCK_KEY,
-        redis_client=redis_client,
-        ttl_seconds=_GLOBAL_SYNC_LOCK_TTL_SECONDS,
-        wait_timeout=2,
-        retry_interval=0.05,
-        log=logger,
-    )
-
-    with global_lock.hold() as acquired:
-        if not acquired:
-            logger.info("background_sync_skipped_lock_busy", extra={"user_id": user_id})
-            return
-        with session_scope() as session:
-            user = session.query(User).filter(User.id == user_id).first()
-            if not user or user.is_deleted or not user.iiko_customer_id:
-                return
-            try:
-                result = AuthService(session).sync_user_from_iiko(user, create_if_missing=False)
-                if result.ok:
-                    session.commit()
-                else:
-                    session.rollback()
-                    logger.info(
-                        "background_sync_skipped_or_failed",
-                        extra={
-                            "user_id": user.id,
-                            "correlation_id": result.correlation_id,
-                            "error": result.error,
-                            "operations": result.operations,
-                        },
-                    )
-            except Exception:
-                session.rollback()
-                logger.exception("Background Iiko sync failed for user %s", user_id)
+def _enqueue_user_sync_job(
+    db: Session,
+    *,
+    user_id: int,
+    phone: str,
+    create_if_missing: bool,
+    source: str,
+) -> None:
+    try:
+        IikoSyncJobService(db).enqueue_user_sync(
+            user_id=user_id,
+            phone=phone,
+            create_if_missing=create_if_missing,
+            source=source,
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to enqueue Iiko sync job for user %s", user_id)
 
 
 def _should_rate_limit_sync(user_id: int) -> bool:
@@ -270,7 +243,6 @@ def _should_rate_limit_sync(user_id: int) -> bool:
 
 @router.get("/me")
 def read_profile(
-    background_tasks: BackgroundTasks,
     payload: dict = Depends(get_token_payload),
     db: Session = Depends(get_db),
     cashback_limit: int = 10,
@@ -319,12 +291,15 @@ def read_profile(
         transactions = cashback_service.get_user_cashbacks(user_id=user.id, limit=cashback_limit)
         loyalty = cashback_service.loyalty_summary(user=user)
 
-        # Fire-and-forget optional sync after response; never block GET latency.
+        # Fire-and-forget optional sync; request path only writes a local queue row.
         if not user.is_deleted and user.iiko_customer_id and not _should_rate_limit_sync(user.id):
-            try:
-                background_tasks.add_task(_sync_user_from_iiko_background, user.id)
-            except Exception:
-                logger.exception("Failed to schedule background sync for user %s", user.id)
+            _enqueue_user_sync_job(
+                db,
+                user_id=user.id,
+                phone=user.phone,
+                create_if_missing=False,
+                source="auth_me_refresh",
+            )
 
         return {
             "type": AuthActorType.CLIENT.value,

@@ -26,8 +26,7 @@ class IikoService:
     TOKEN_FETCH_TIMEOUT = httpx.Timeout(connect=3.0, read=8.0, write=3.0, pool=3.0)
     TOKEN_LOCK_KEY = "iiko:access_token:lock"
     TOKEN_LOCK_TTL_SECONDS = 15
-    TOKEN_LOCK_WAIT_SECONDS = 5
-    TOKEN_LOCK_SLEEP_SECONDS = 0.05
+    TOKEN_LOCK_RETRY_AFTER_SECONDS = 1.0
 
     USER_LOCK_TTL_SECONDS = 20
     USER_LOCK_WAIT_SECONDS = 6
@@ -84,21 +83,22 @@ class IikoService:
         """
         Single-flight guard so only one worker/process refreshes the token at a time.
         Prefers Redis distributed lock when available; falls back to process-local lock.
+        This lock is intentionally non-blocking to avoid thread starvation.
         """
         lock_value = str(uuid.uuid4())
         acquired = False
 
         if isinstance(self._cache_backend, RedisCacheBackend):
-            deadline = time.time() + self.TOKEN_LOCK_WAIT_SECONDS
-            while time.time() < deadline:
-                if self._cache_backend.client.set(
-                    self.TOKEN_LOCK_KEY, lock_value, nx=True, ex=self.TOKEN_LOCK_TTL_SECONDS
-                ):
-                    acquired = True
-                    break
-                time.sleep(self.TOKEN_LOCK_SLEEP_SECONDS)
+            acquired = bool(
+                self._cache_backend.client.set(
+                    self.TOKEN_LOCK_KEY,
+                    lock_value,
+                    nx=True,
+                    ex=self.TOKEN_LOCK_TTL_SECONDS,
+                )
+            )
         else:
-            acquired = self._local_token_lock.acquire(timeout=self.TOKEN_LOCK_WAIT_SECONDS)
+            acquired = self._local_token_lock.acquire(blocking=False)
 
         try:
             yield acquired
@@ -146,7 +146,10 @@ class IikoService:
                 if cached:
                     return cached
             if not acquired:
-                logger.debug("Proceeding to fetch token without lock (lock not acquired in time)")
+                raise exceptions.TransientServiceError(
+                    "iiko_token_refresh_in_progress",
+                    retry_after_seconds=self.TOKEN_LOCK_RETRY_AFTER_SECONDS,
+                )
             return self._fetch_token()
 
     def _auth_headers(self, *, force_refresh: bool = False) -> dict[str, str]:

@@ -92,6 +92,34 @@ ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS middle_name VARCHAR(100) NU
 ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS pending_iiko_profile_update JSONB NULL;
 ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS giftget BOOLEAN NOT NULL DEFAULT FALSE;
 
+CREATE TABLE IF NOT EXISTS iiko_sync_jobs (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NULL,
+    phone VARCHAR(20) NULL,
+    operation VARCHAR(32) NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    payload JSONB NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 8,
+    next_retry_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    last_attempt_at TIMESTAMP WITH TIME ZONE NULL,
+    completed_at TIMESTAMP WITH TIME ZONE NULL,
+    lock_owner VARCHAR(64) NULL,
+    locked_at TIMESTAMP WITH TIME ZONE NULL,
+    last_error TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_iiko_sync_jobs_status_next_retry_at
+ON iiko_sync_jobs(status, next_retry_at);
+CREATE INDEX IF NOT EXISTS ix_iiko_sync_jobs_user_operation
+ON iiko_sync_jobs(user_id, operation);
+CREATE INDEX IF NOT EXISTS ix_iiko_sync_jobs_user_id
+ON iiko_sync_jobs(user_id);
+CREATE INDEX IF NOT EXISTS ix_iiko_sync_jobs_phone
+ON iiko_sync_jobs(phone);
+
 CREATE TABLE IF NOT EXISTS deleted_phones (
     id SERIAL PRIMARY KEY,
     real_phone VARCHAR(20) NOT NULL,

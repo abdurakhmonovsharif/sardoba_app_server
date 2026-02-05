@@ -34,7 +34,6 @@ from app.models import (
 from . import exceptions
 from .auth_log_service import log_auth_event
 from .card_service import CardService
-from .iiko_profile_sync_service import IikoProfileSyncService
 from .iiko_service import IikoService
 from .otp_service import OTPService
 
@@ -96,7 +95,6 @@ class AuthService:
         self.settings = get_settings()
         self.otp_service = OTPService(db)
         self.card_service = CardService(db)
-        self.profile_sync_service = IikoProfileSyncService(db)
         self.iiko_service = IikoService()
         self._cache_backend = cache_manager.get_backend()
         self._redis_client = self._cache_backend.client if isinstance(self._cache_backend, RedisCacheBackend) else None
@@ -190,20 +188,6 @@ class AuthService:
 
         self.db.flush()
 
-        if is_register:
-            result = self.sync_user_from_iiko(user, create_if_missing=True, admin_sync=True)
-            if not result.ok:
-                self.db.rollback()
-                raise exceptions.ServiceError(
-                    f"Iiko sync failed during registration: {result.error or 'unknown_error'}"
-                )
-        else:
-            if not user.iiko_customer_id:
-                self.db.rollback()
-                raise exceptions.ConflictError(
-                    "Profilingiz iiko bilan bog'lanmagan. Iltimos qayta ro'yxatdan o'ting yoki qo'llab-quvvatlashga murojaat qiling."
-                )
-
         tokens = self.issue_tokens(actor_type=AuthActorType.CLIENT, subject_id=user.id)
 
         log_auth_event(
@@ -216,10 +200,6 @@ class AuthService:
             user_agent=user_agent,
             meta={"purpose": purpose, "otp_id": otp.id},
         )
-
-        # Flush pending profile updates only when we already have a linked iiko customer to avoid background creation.
-        if user.iiko_customer_id and self.profile_sync_service:
-            self.profile_sync_service.flush_pending_updates(user)
 
         self.db.commit()
         self.db.refresh(user)

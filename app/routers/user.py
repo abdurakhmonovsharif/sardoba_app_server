@@ -21,7 +21,7 @@ from app.schemas import (
     UserUpdate,
     StaffRead,
 )
-from app.services import CashbackService, IikoProfileSyncService, UserService
+from app.services import CashbackService, IikoSyncJobService, UserService
 
 router = APIRouter(prefix="/users", tags=["users"])
 logger = logging.getLogger(__name__)
@@ -165,6 +165,9 @@ def update_profile(
         return UserRead.from_orm(current_user)
 
     db.add(current_user)
+    merged_pending_updates: dict[str, Any] = {}
+    if current_user.pending_iiko_profile_update:
+        merged_pending_updates.update(current_user.pending_iiko_profile_update)
     if iiko_updates:
         composed_full_name = " ".join(
             part.strip()
@@ -173,13 +176,24 @@ def update_profile(
         ).strip()
         if composed_full_name and "fullName" not in iiko_updates:
             iiko_updates["fullName"] = composed_full_name
+        merged_pending_updates.update(iiko_updates)
 
-    sync_service = IikoProfileSyncService(db)
-    if iiko_updates or current_user.pending_iiko_profile_update:
-        sync_service.sync_profile_updates(current_user, iiko_updates or None)
+    current_user.pending_iiko_profile_update = merged_pending_updates or None
+    db.add(current_user)
 
     db.commit()
     db.refresh(current_user)
+
+    if current_user.pending_iiko_profile_update:
+        try:
+            IikoSyncJobService(db).enqueue_profile_sync(
+                user_id=current_user.id,
+                phone=current_user.phone,
+                source="user_profile_update",
+            )
+        except Exception:
+            db.rollback()
+            logger.exception("Failed to enqueue Iiko profile sync for user %s", current_user.id)
 
     return UserRead.from_orm(current_user)
 

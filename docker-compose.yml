@@ -13,6 +13,18 @@ services:
       - ./media:/app/media
       - ./logs:/var/log/sardoba
 
+  iiko-worker:
+    build: .
+    container_name: sardoba_app_server-iiko-worker
+    command: ["python", "scripts/run_iiko_sync_worker.py"]
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    volumes:
+      - ./logs:/var/log/sardoba
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     container_name: sardoba_app_server-redis

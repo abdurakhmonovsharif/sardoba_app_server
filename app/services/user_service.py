@@ -1,4 +1,3 @@
-import logging
 import random
 import string
 from datetime import datetime, timezone
@@ -6,16 +5,12 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models import User
-from app.services.iiko_service import IikoService
 from . import exceptions as service_exceptions
-
-logger = logging.getLogger(__name__)
-
+from .iiko_sync_job_service import IikoSyncJobService
 
 class UserService:
     def __init__(self, db: Session):
         self.db = db
-        self._iiko = IikoService()
 
     def delete_user(self, user: User, *, notify_iiko: bool = True) -> dict[str, bool]:
         if user.deleted:
@@ -30,22 +25,15 @@ class UserService:
         user.deleted_at = timestamp
         self.db.add(user)
         self.db.flush()
-        payload = {
-            "isDeleted": True,
-            "name": user.name or "",
-            "phone": real_phone,
-        }
-        if user.iiko_customer_id:
-            payload["id"] = user.iiko_customer_id
         if notify_iiko:
-            try:
-                self._iiko.create_or_update_customer(
-                    phone=real_phone, payload_extra=payload
-                )
-            except service_exceptions.ServiceError as exc:
-                logger.warning(
-                    "Failed to notify Iiko about deleted user %s: %s", user.id, exc
-                )
+            IikoSyncJobService(self.db).enqueue_delete_sync(
+                user_id=user.id,
+                phone=real_phone,
+                customer_id=user.iiko_customer_id,
+                full_name=user.name,
+                source="user_delete",
+                auto_commit=False,
+            )
         self.db.delete(user)
         self.db.commit()
         return {"success": True}

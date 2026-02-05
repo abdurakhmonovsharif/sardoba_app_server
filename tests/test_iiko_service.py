@@ -9,6 +9,7 @@ class DummyClient:
     def __init__(self, outcomes: list[object]):
         self.outcomes = outcomes
         self.timeout = httpx.Timeout(connect=1.0, read=1.0, write=1.0, pool=1.0)
+        self.base_url = httpx.URL("http://example.com")
         self.calls = 0
 
     def request(self, method, path, json=None, headers=None, timeout=None):

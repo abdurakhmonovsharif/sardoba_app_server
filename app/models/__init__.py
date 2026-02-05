@@ -10,6 +10,7 @@ from .otp_code import OTPCode
 from .product import Product
 from .staff import Staff
 from .user import User
+from .iiko_sync_job import IikoSyncJob
 from .notification_token import NotificationDeviceToken
 from .deleted_phone import DeletedPhone
 from .user_notification import UserNotification
@@ -27,6 +28,7 @@ __all__ = [
     "Product",
     "Staff",
     "User",
+    "IikoSyncJob",
     "NotificationDeviceToken",
     "DeletedPhone",
     "UserNotification",

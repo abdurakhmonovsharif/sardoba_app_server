@@ -1,6 +1,7 @@
 import httpx
 
 from app.models import OTPCode, User
+from app.models.iiko_sync_job import IikoSyncJob
 from app.services import exceptions as service_exceptions
 
 
@@ -105,44 +106,33 @@ def test_deleted_user_can_reregister(client, db_session):
     assert reactivated.date_of_birth.strftime("%d.%m.%Y") == "01.01.1991"
 
 
-def test_delete_user_notifies_iiko_with_real_phone(db_session, monkeypatch):
+def test_delete_user_enqueues_iiko_delete_job_with_real_phone(db_session):
     phone = "+998901020202"
     user = User(name="Notify Real", phone=phone)
     db_session.add(user)
     db_session.commit()
 
-    class FakeIikoService:
-        def __init__(self):
-            self.calls: list[dict[str, object]] = []
-
-        def create_or_update_customer(
-            self, *, phone: str, payload_extra: dict[str, object] | None = None
-        ) -> dict[str, object]:
-            self.calls.append(
-                {
-                    "phone": phone,
-                    "payload": dict(payload_extra) if payload_extra else {},
-                }
-            )
-            return {}
-
-    fake_service = FakeIikoService()
-    monkeypatch.setattr("app.services.user_service.IikoService", lambda: fake_service)
-
     from app.services.user_service import UserService
 
     UserService(db_session).delete_user(user)
-    assert len(fake_service.calls) == 1
-    recorded = fake_service.calls[0]
-    assert recorded["phone"] == phone
-    assert recorded["payload"].get("isDeleted") is True
-    assert recorded["payload"].get("phone") == phone
+    job = (
+        db_session.query(IikoSyncJob)
+        .filter(IikoSyncJob.operation == "mark_deleted", IikoSyncJob.phone == phone)
+        .order_by(IikoSyncJob.id.desc())
+        .first()
+    )
+    assert job is not None
+    payload = job.payload.get("iiko_payload", {}) if isinstance(job.payload, dict) else {}
+    assert payload.get("isDeleted") is True
+    assert payload.get("phone") == phone
 
 
-def test_register_aborts_on_iiko_bad_request(client, db_session, monkeypatch):
+def test_register_succeeds_when_iiko_is_unavailable(client, db_session, monkeypatch):
     phone = "+998901005005"
+    calls = {"count": 0}
 
     def fake_create_or_update_customer(self, *, phone: str, payload_extra: dict | None = None):
+        calls["count"] += 1
         request = httpx.Request("POST", "https://api-ru.iiko.services/api/1/loyalty/iiko/customer/create_or_update")
         response = httpx.Response(status_code=400)
         raise service_exceptions.ServiceError("Iiko rejected the payload") from httpx.HTTPStatusError(
@@ -167,9 +157,18 @@ def test_register_aborts_on_iiko_bad_request(client, db_session, monkeypatch):
         "/api/v1/auth/client/verify-otp",
         json={"phone": phone, "code": otp.code, "purpose": "register"},
     )
-    assert response.status_code == 400
-    db_session.rollback()
-    assert db_session.query(User).filter(User.phone == phone).first() is None
+    assert response.status_code == 200
+    assert calls["count"] == 0
+    user = db_session.query(User).filter(User.phone == phone).first()
+    assert user is not None
+    job = (
+        db_session.query(IikoSyncJob)
+        .filter(IikoSyncJob.operation == "sync_user", IikoSyncJob.user_id == user.id)
+        .order_by(IikoSyncJob.id.desc())
+        .first()
+    )
+    assert job is not None
+    assert job.status == "pending"
 
 
 def test_user_can_upload_profile_photo(client, db_session):
