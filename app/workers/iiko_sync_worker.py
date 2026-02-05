@@ -204,3 +204,11 @@ class IikoSyncWorker:
             "iiko_sync_worker_metrics",
             extra={"worker_id": self.worker_id, **self._metrics},
         )
+
+
+def main() -> None:
+    IikoSyncWorker().run_forever()
+
+
+if __name__ == "__main__":
+    main()

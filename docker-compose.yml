@@ -16,7 +16,7 @@ services:
   iiko-worker:
     build: .
     container_name: sardoba_app_server-iiko-worker
-    command: ["python", "scripts/run_iiko_sync_worker.py"]
+    command: ["python", "-m", "app.workers.iiko_sync_worker"]
     env_file:
       - .env
     depends_on:
