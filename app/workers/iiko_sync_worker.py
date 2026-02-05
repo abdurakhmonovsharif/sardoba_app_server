@@ -109,6 +109,13 @@ class IikoSyncWorker:
                 self._execute_operation(operation=operation, user_id=user_id, phone=phone, payload=payload)
             except service_exceptions.TransientServiceError as exc:
                 self._inc_metric("transient_retry")
+                logger.warning(
+                    "iiko_sync_job_transient_retry job_id=%s operation=%s reason=%s retry_after=%s",
+                    job_id,
+                    operation,
+                    str(exc),
+                    exc.retry_after_seconds,
+                )
                 with session_scope() as session:
                     IikoSyncJobService(session).requeue_transient(
                         job_id=job_id,
@@ -130,6 +137,7 @@ class IikoSyncWorker:
 
         with session_scope() as session:
             IikoSyncJobService(session).mark_success(job_id=job_id, worker_id=self.worker_id)
+        logger.info("iiko_sync_job_success job_id=%s operation=%s", job_id, operation)
         self._inc_metric("success")
 
     def _execute_operation(

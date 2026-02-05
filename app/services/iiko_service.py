@@ -180,7 +180,12 @@ class IikoService:
             corr = get_correlation_id() or ensure_correlation_id("iiko")
             started = time.perf_counter()
             logger.info(
-                "iiko_request_start",
+                "iiko_request_start method=%s path=%s attempt=%s/%s url=%s",
+                method,
+                path,
+                attempt,
+                attempts,
+                full_url,
                 extra={
                     "method": method,
                     "path": path,
@@ -199,7 +204,13 @@ class IikoService:
                 )
                 elapsed_ms = (time.perf_counter() - started) * 1000
                 logger.info(
-                    "iiko_request_success",
+                    "iiko_request_success method=%s path=%s status=%s attempt=%s/%s elapsed_ms=%.1f",
+                    method,
+                    path,
+                    response.status_code,
+                    attempt,
+                    attempts,
+                    elapsed_ms,
                     extra={
                         "method": method,
                         "path": path,
@@ -216,7 +227,19 @@ class IikoService:
                 should_retry = self._should_retry(exc, is_idempotent)
                 timeouts = timeout_override or self._client.timeout
                 logger.warning(
-                    "iiko_request_failed",
+                    (
+                        "iiko_request_failed method=%s path=%s stage=%s exception=%s "
+                        "attempt=%s/%s elapsed_ms=%.1f will_retry=%s url=%s"
+                    ),
+                    method,
+                    path,
+                    stage,
+                    exc.__class__.__name__,
+                    attempt,
+                    attempts,
+                    elapsed_ms,
+                    should_retry and attempt < attempts,
+                    full_url,
                     extra={
                         "method": method,
                         "path": path,
@@ -297,13 +320,19 @@ class IikoService:
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            body_preview = exc.response.text[:1000].replace("\n", "\\n")
             logger.error(
-                "iiko_request_http_error",
+                "iiko_request_http_error method=%s path=%s status=%s body=%s",
+                method,
+                path,
+                status_code,
+                body_preview,
                 extra={
                     "method": method,
                     "path": path,
-                    "status_code": exc.response.status_code,
-                    "body": exc.response.text[:5000],
+                    "status_code": status_code,
+                    "body": body_preview,
                 },
             )
             raise
