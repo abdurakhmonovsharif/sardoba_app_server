@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Query, status
 from sqlalchemy.orm import Session
 
 from app.core.cache import RedisCacheBackend, cache_manager
+from app.core.phone import normalize_uzbek_phone
 from app.core.dependencies import (
     get_current_manager,
     get_current_staff,
@@ -44,10 +45,11 @@ def request_client_otp(
     request: Request,
     db: Session = Depends(get_db),
 ):
+    phone = normalize_uzbek_phone(payload.phone)
     service = AuthService(db)
     try:
         service.request_client_otp(
-            phone=payload.phone,
+            phone=phone,
             purpose=payload.purpose,
             ip=getattr(request.state, "ip", None),
             user_agent=getattr(request.state, "user_agent", None),
@@ -71,10 +73,11 @@ def verify_client_otp(
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict:
+    phone = normalize_uzbek_phone(payload.phone)
     service = AuthService(db)
     try:
         user, tokens = service.verify_client_otp(
-            phone=payload.phone,
+            phone=phone,
             code=payload.code,
             purpose=payload.purpose,
             name=payload.name,

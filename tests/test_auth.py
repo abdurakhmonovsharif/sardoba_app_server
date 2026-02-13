@@ -120,8 +120,8 @@ def test_client_registers_with_waiter_referral(client, db_session):
 
 
 def test_client_phone_is_normalized_with_998_prefix(client, db_session):
-    raw_phone = "+918215456"
-    normalized_phone = "+998918215456"
+    raw_phone = "+919215456"
+    normalized_phone = "+998919215456"
 
     request_resp = client.post(
         "/api/v1/auth/client/request-otp",
@@ -136,6 +136,13 @@ def test_client_phone_is_normalized_with_998_prefix(client, db_session):
         .first()
     )
     assert otp is not None
+    raw_otp = (
+        db_session.query(OTPCode)
+        .filter(OTPCode.phone == raw_phone)
+        .order_by(OTPCode.id.desc())
+        .first()
+    )
+    assert raw_otp is None
 
     verify_resp = client.post(
         "/api/v1/auth/client/verify-otp",
