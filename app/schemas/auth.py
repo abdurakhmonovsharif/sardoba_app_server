@@ -3,6 +3,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, root_validator, validator
 
+from app.core.phone import normalize_uzbek_phone
 from app.models.enums import SardobaBranch, StaffRole
 from .common import Pagination
 
@@ -10,6 +11,13 @@ from .common import Pagination
 class ClientOTPRequest(BaseModel):
     phone: str = Field(..., regex=r"^\+?\d{7,15}$")
     purpose: str = Field(default="login")
+
+    @validator("phone", pre=True)
+    def normalize_phone(cls, value: str) -> str:
+        try:
+            return normalize_uzbek_phone(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class ClientOTPVerify(BaseModel):
@@ -19,6 +27,13 @@ class ClientOTPVerify(BaseModel):
     waiter_referral_code: Optional[str] = Field(default=None, max_length=12, alias="referral_code")
     purpose: str = Field(default="login")
     date_of_birth: Optional[date] = None
+
+    @validator("phone", pre=True)
+    def normalize_phone(cls, value: str) -> str:
+        try:
+            return normalize_uzbek_phone(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
     @validator("date_of_birth", pre=True)
     def validate_date_of_birth(cls, value):

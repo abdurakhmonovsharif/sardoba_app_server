@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import security
+from app.core.phone import normalize_uzbek_phone
 from app.core.config import get_settings
 from app.models import (
     AuthAction,
@@ -107,6 +108,7 @@ class AuthService:
         return {"access": access, "refresh": refresh}
 
     def request_client_otp(self, *, phone: str, purpose: str, ip: str | None, user_agent: str | None) -> None:
+        phone = normalize_uzbek_phone(phone)
         normalized_purpose = (purpose or "").lower()
         active_user_exists = (
             self.db.query(User.id)
@@ -143,6 +145,7 @@ class AuthService:
         ip: str | None,
         user_agent: str | None,
     ) -> tuple[User, dict[str, str]]:
+        phone = normalize_uzbek_phone(phone)
         otp = self.otp_service.verify_otp(phone=phone, code=code, purpose=purpose)
         request_payload = {
             "phone": phone,

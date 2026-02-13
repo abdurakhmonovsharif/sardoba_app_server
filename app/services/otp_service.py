@@ -6,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.phone import normalize_uzbek_phone
 from app.models import OTPCode
 from app.services.sms_providers import EskizSMSProvider
 
@@ -46,7 +47,8 @@ class OTPService:
 
     def request_otp(self, *, phone: str, purpose: str, ip: str | None, user_agent: str | None) -> OTPCode:
         now = datetime.now(tz=timezone.utc)
-        normalized_phone = self._normalize_phone(phone)
+        phone = self._normalize_phone(phone)
+        normalized_phone = phone
         normalized_purpose = (purpose or "").lower()
         window_minutes = self.settings.RATE_LIMIT_BLOCK_MINUTES
         window_start = now - timedelta(minutes=window_minutes)
@@ -114,7 +116,8 @@ class OTPService:
 
     def verify_otp(self, *, phone: str, code: str, purpose: str) -> OTPCode:
         now = datetime.now(tz=timezone.utc)
-        normalized_phone = self._normalize_phone(phone)
+        phone = self._normalize_phone(phone)
+        normalized_phone = phone
         bypass_demo_code = normalized_phone in self._verify_bypass and code == self._demo_code
 
         otp = (
@@ -189,4 +192,4 @@ class OTPService:
 
     @staticmethod
     def _normalize_phone(phone: str) -> str:
-        return phone.strip().replace(" ", "")
+        return normalize_uzbek_phone(phone)

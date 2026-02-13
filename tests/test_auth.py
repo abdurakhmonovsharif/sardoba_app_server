@@ -119,6 +119,53 @@ def test_client_registers_with_waiter_referral(client, db_session):
     assert profile["profile"]["date_of_birth"] == dob
 
 
+def test_client_phone_is_normalized_with_998_prefix(client, db_session):
+    raw_phone = "+918215456"
+    normalized_phone = "+998918215456"
+
+    request_resp = client.post(
+        "/api/v1/auth/client/request-otp",
+        json={"phone": raw_phone, "purpose": "register"},
+    )
+    assert request_resp.status_code == 204
+
+    otp = (
+        db_session.query(OTPCode)
+        .filter(OTPCode.phone == normalized_phone)
+        .order_by(OTPCode.id.desc())
+        .first()
+    )
+    assert otp is not None
+
+    verify_resp = client.post(
+        "/api/v1/auth/client/verify-otp",
+        json={"phone": raw_phone, "code": otp.code, "name": "Normalized User", "purpose": "register"},
+    )
+    assert verify_resp.status_code == 200
+    payload = verify_resp.json()
+    access_token = payload["tokens"]["access_token"]
+    assert access_token
+
+    created_user = db_session.query(User).filter(User.phone == normalized_phone).first()
+    assert created_user is not None
+
+    me_resp = client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert me_resp.status_code == 200
+    me_payload = me_resp.json()
+    assert me_payload["profile"]["phone"] == normalized_phone
+
+
+def test_client_rejects_invalid_phone_length(client):
+    response = client.post(
+        "/api/v1/auth/client/request-otp",
+        json={"phone": "+99918215456", "purpose": "register"},
+    )
+    assert response.status_code == 422
+
+
 def test_staff_login_and_refresh(client, session_factory):
     session = session_factory()
     manager = Staff(
